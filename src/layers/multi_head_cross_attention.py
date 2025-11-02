@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 
+
 class MultiHeadCrossAttentionLayer(nn.Module):
     def __init__(self, dim: int, num_heads: int):
         super().__init__()

@@ -6,6 +6,7 @@ from feed_forward import FeedForwardLayer
 
 from torch.nn.init import trunc_normal_
 
+
 class CrossModalTransformerLayer(nn.Module):
     """
     A transformer layer for cross-modal processing.

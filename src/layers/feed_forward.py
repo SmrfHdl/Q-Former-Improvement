@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 
+
 class FeedForwardLayer(nn.Module):
     """
     Feed Forward Network with 2 linear layers and a GELU activation.

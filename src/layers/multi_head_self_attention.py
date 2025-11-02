@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.init import trunc_normal_
 
+
 class MultiHeadSelfAttentionLayer(nn.Module):
     def __init__(self, dim: int, num_heads: int):
         """

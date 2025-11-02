@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch import transpose, matmul, softmax
 
+
 def multi_head_attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor = None):
     """
     Compute multi-head attention.

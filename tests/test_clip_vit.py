@@ -2,6 +2,8 @@ from src.model.clip_vit import VisionEncoder
 import torch
 from transformers import CLIPProcessor, CLIPModel
 from PIL import Image
+import requests
+
 
 def main():
     model_name = "openai/clip-vit-large-patch14"
@@ -28,3 +30,6 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total parameters: {total_params}")
     print(f"Trainable parameters: {trainable_params}")
+
+if __name__ == "__main__":
+    main()
