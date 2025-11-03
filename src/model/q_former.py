@@ -6,6 +6,7 @@ from transformers import BertTokenizer, BertModel
 from layers.cross_modal_transformer import CrossModalTransformer
 from torchmetrics import Accuracy
 from clip_vit import VisionEncoder
+from loguru import logger
 
 
 class QFormer(nn.Module):
@@ -111,4 +112,114 @@ class QFormer(nn.Module):
 
         self.tokenizer = self.clip_tokenizer
 
+    def _setup_bert_model(self, unfreeze_bert_layers: int):
+        self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        self.tokenizer.add_special_tokens({"bos_token": "[DEC]"})
+        self.bert = BertModel.from_pretrained("bert-base-uncased").to(self.device)
+        self.bert.resize_token_embeddings(len(self.tokenizer))
+        self.dec_token_id = self.tokenizer.convert_tokens_to_ids('[DEC]')
+
+        for param in self.bert.parameters():
+            param.requires_grad = False
+
+        if unfreeze_bert_layers > 0:
+            self._unfreeze_bert_layers(unfreeze_bert_layers)
+
+        self.text_dim = self.bert.config.hidden_size
+
+    def init_weights(self):
+        nn.init.kaiming_normal_(self.vision_projection.weight, nonlinearity='relu')
+        nn.init.zeros_(self.vision_projection.bias)
+
+        nn.init.kaiming_normal_(self.text_projection.weight, nonlinearity='relu')
+        nn.init.zeros_(self.text_projection.bias)
+
+        nn.init.normal_(self.learned_queries, std=0.02)
+
+        nn.init.constant_(self.temperature, 0.07)
+
+        nn.init.normal_(self.itm_head.weight, std=0.02)
+        nn.init.zeros_(self.itm_head.bias)
+
+        nn.init.normal_(self.lm_head.weight, std=0.02)
+        nn.init.zeros_(self.lm_head.bias)
+
+        nn.init.normal_(self.answer_head.weight, std=0.02)
+        nn.init.zeros_(self.answer_head.bias)
+
+        for layer in self.cat_mlp:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+
+        final_layer = self.cat_mlp[-1]
+        if isinstance(final_layer, nn.Linear):
+            nn.init.normal_(final_layer.weight, mean=0.0, std=0.02)
+            final_layer.bias.data.fill_(0.0)
+
+    def _unfreeze_clip_layers(self, unfreeze_layers: int):
+        for param in self.clip_model.parameters():
+            param.requires_grad = False
+
+        for i, block in enumerate(reversed(self.clip_model.text_model.encoder.layers)):
+            if i < unfreeze_layers:
+                for param in block.parameters():
+                    param.requires_grad = True
+
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        logger.info(f"Unfroze {unfreeze_layers} layers of CLIP text model. Trainable parameters: {trainable_params}")
+
+    def _unfreeze_bert_layers(self, unfreeze_layers: int):
+        for param in self.bert.parameters():
+            param.requires_grad = False
+
+        for i, layer in enumerate(reversed(self.bert.encoder.layer)):
+            if i < unfreeze_layers:
+                for param in layer.parameters():
+                    param.requires_grad = True
+
+        # for param in self.bert.pooler.parameters():
+        #     param.requires_grad = True
+
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        logger.info(f"Unfroze {unfreeze_layers} layers of BERT model. Trainable parameters: {trainable_params}")
+
+    def encode_text(self, questions: list[str] | str):
+        if self.use_clip_for_text:
+            questions_tokens = self.clip_processor(
+                text=questions,
+                padding='max_length',
+                truncation=True,
+                max_length=self.max_text_len,
+                return_tensors='pt'
+            ).to(self.device)
+
+            questions_tokens = {k: v.to(self.device) for k, v in questions_tokens.items()}
+
+            question_output = self.clip_model.text_model(
+                input_ids=questions_tokens['input_ids'],
+                attention_mask=questions_tokens['attention_mask'],
+                output_hidden_states=True,
+                return_dict=True
+            )
+        else:
+            question_tokens = self.tokenizer(
+                questions,
+                padding='max_length',
+                truncation=True,
+                max_length=self.max_text_len,
+                return_tensors='pt'
+            ).to(self.device)
+
+            question_tokens = {k: v.to(self.device) for k, v in question_tokens.items()}
+
+            question_output = self.bert(
+                input_ids=question_tokens['input_ids'],
+                attention_mask=question_tokens['attention_mask'],
+                return_dict=True
+            )
+
+        return question_output, question_tokens
     
+    def generate_attention_mask(self, task: str, )
