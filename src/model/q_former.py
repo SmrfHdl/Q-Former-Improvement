@@ -222,4 +222,51 @@ class QFormer(nn.Module):
 
         return question_output, question_tokens
     
-    def generate_attention_mask(self, task: str, )
+    def generate_attention_mask(self, task: str, query_len: int, pad_mask: torch.Tensor, device: torch.device = 'cpu'):
+        """
+        Generates attention mask based on the task (ITM, IGT, ITC) and padding mask.
+
+        Args:
+            task (str): Task type - 'itm', 'igt', or 'itc'.
+            query_len (int): number of tokens in the query.
+            pad_mask (torch.Tensor): 1: valid token (not padding), 0: padding token. 
+                Shape: (batch_size, seq_len)
+            device (torch.device): Device to place the tensors on.
+
+        Returns:
+            Attention mask (torch.Tensor): 0 means "can attend", -inf means "cannot attend".
+                Shape: batch_size, total_len, total_len
+        """
+        batch_size, text_len = pad_mask.size()
+        total_len = query_len + text_len 
+
+        task_mask = torch.zeros((batch_size, total_len, total_len), device=device)
+
+        if task == 'itm':
+            pass
+
+        elif task == "igt":
+            causal_indices = torch.triu_indices(text_len, text_len, offset=1, device=device)
+
+            for b in range(batch_size):
+                task_mask[b, query_len + causal_indices[0], query_len + causal_indices[1]] = float('-inf')
+
+            task_mask[:, :query_len, query_len:] = float('-inf')
+
+        elif task == 'itc':
+            task_mask[:, :query_len, query_len:] = float('-inf')
+            task_mask[:, query_len:, :query_len] = float('-inf')
+
+        padding_postitions = (pad_mask == 0)
+
+        for b in range(batch_size):
+            if padding_postitions[b].any():
+                pad_indices = torch.nonzero(padding_postitions[b], as_tuple=True)[0]
+
+                task_mask[b, :, query_len + pad_indices] = float('-inf')
+
+                task_mask[b, query_len + pad_indices, :] = float('-inf')
+
+        return task_mask
+    
+    
