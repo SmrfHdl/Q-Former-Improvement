@@ -4,8 +4,6 @@ import requests
 from transformers import CLIPProcessor, CLIPModel
 from loguru import logger
 
-logger = logger.get(__name__)
-
 
 class VisionEncoder:
     def __init__(
