@@ -270,119 +270,206 @@ class QFormer(nn.Module):
 
         return task_mask
     
-    def _setup_bert_model(self, unfreeze_bert_layers: int):
-        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        self.tokenizer.add_special_tokens({"bos_token": "[DEC]"})
-        self.bert = BertModel.from_pretrained('bert-base-uncased').to(self.device)
-        self.bert.resize_token_embeddings(len(self.tokenizer))
-        self.dec_token_id = self.tokenizer.convert_tokens_to_ids('[DEC]')
+    def forward(self, samples: dict):
+        image_input = samples['image_input']
+        image_features = self.vision_encoder.encode(image_input) # (batch_size, num_patches = 256, hidden_dim = 1024)
 
-        for param in self.bert.parameters():
-            param.requires_grad = False
+        question = samples['question']
+        
+        batch_size = image_features.shape[0]
 
-        if unfreeze_bert_layers > 0:
-            self._unfreeze_bert_layers(unfreeze_bert_layers)
+        image_features = F.normalize(self.vision_projection(image_features), dim=-1)
 
-        self.text_dim = self.bert.config.hidden_size
+        queries = self.learned_queries.expand(image_features.shape[0], -1, -1).clone() # (batch_size, num_queries = 32, hidden_dim = 768)
 
-    def init_weights(self):
-        nn.init.kaiming_normal_(self.vision_projection.weight, nonlinearity='relu')
-        nn.init.zeros_(self.vision_projection.bias)
+        question_output, question_tokens = self.encode_text(question)
 
-        nn.init.kaiming_normal_(self.text_projection.weight, nonlinearity='relu')
-        nn.init.zeros_(self.text_projection.bias)
+        # Image Text Contrastive
+        cls_text_embedding = question_output['last_hidden_state'][:, 0, :] # (batch_size, hidden_dim)
+        cls_text_embedding = F.normalize(self.text_projection(cls_text_embedding), dim=-1) # (batch_size, hidden_dim)
 
-        nn.init.normal_(self.learned_queries, mean=0.0, std=0.02)
+        attention_mask = self.generate_attention_mask(
+            task='itc',
+            query_len=queries.shape[1],
+            pad_mask=question_tokens['attention_mask'],
+            device=self.device
+        ) # (batch_size, num_queries + text_len, num_queries + text_len)
+        queries, _ = self.cross_modal_transformer(
+            image_features,
+            queries,
+            text_embeddings=question_output['last_hidden_state'],
+            attention_mask=attention_mask
+        )
 
-        nn.init.constant_(self.temperature, 0.07)
+        queries = F.normalize(queries, dim=-1) # (batch_size, num_queries, hidden_dim)
 
-        nn.init.normal_(self.itm_head.weight, std=0.02)
-        nn.init.zeros_(self.itm_head.bias)
+        # Image to Text similarity calculation
+        sim_i2t = torch.einsum("bqd, td -> btq", queries, cls_text_embedding)
 
-        nn.init.normal_(self.lm_head.weight, std=0.02)
-        nn.init.zeros_(self.lm_head.bias)
+        sim_i2t, _ = sim_i2t.max(-1) # Max over queries: (b, t)
+        sim_i2t = sim_i2t / self.temperature
 
-        nn.init.normal_(self.answer_head.weight, std=0.02)
-        nn.init.zeros_(self.answer_head.bias)
+        sim_t2i = sim_i2t.T # (batch_size, q, t)
 
-        for layer in self.cat_mlp:
-            if isinstance(layer, nn.Linear):
-                nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
+        targets = torch.arange(batch_size, device=image_features.device, dtype=int)
 
-        final_layer = self.cat_mlp[-1]
-        if isinstance(final_layer, nn.Linear):
-            nn.init.normal_(final_layer, mean=0.0, std=0.01)
-            final_layer.bias.data.fill_(0.0)
+        loss_itc = (F.cross_entropy(sim_i2t, targets, label_smoothing=0.1) +
+                    F.cross_entropy(sim_t2i, targets, label_smoothing=0.1)) / 2
+        
+        # Image Text Matching
+        with torch.no_grad():
+            sim_i2t.fill_diagonal_(-10000)
+            sim_t2i.fill_diagonal_(-10000)
 
-        logger.info("Model weights initialized.")
+        weights_t2i = torch.softmax(sim_t2i, dim=-1)
+        weights_i2t = torch.softmax(sim_i2t, dim=-1)
 
-    def _unfreeze_clip_layers(self, num_layers: int):
-        for param in self.clip_model.parameters():
-            param.requires_grad = False
+        image_embeddings_negative = []
+        for b in range(batch_size):
+            negative_idx = torch.multinomial(weights_t2i[b], 1).item()
+            image_embeddings_negative.append(image_features[negative_idx])
 
-        for i, block in enumerate(reversed(self.clip_model.text_model.encoder.layers)):
-            if i < num_layers:
-                for param in block.parameters():
-                    param.requires_grad = True
+        image_embeddings_negative = torch.stack(image_embeddings_negative, dim=0) # (batch_size, num_patches, hidden_dim)
 
-        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        logger.info(f"Unfroze {num_layers} layers of CLIP text model. Trainable parameters: {trainable}")
+        text_embeddings_negative = []
+        attention_masks_negative = []
 
-    def _unfreeze_bert_layers(self, num_layers: int):
-        for param in self.bert.parameters():
-            param.requires_grad = False
+        for b in range(batch_size):
+            negative_idx = torch.multinomial(weights_i2t[b], 1).item()
+            text_embeddings_negative.append(question_output['last_hidden_state'][negative_idx])
+            attention_masks_negative.append(question_tokens['attention_mask'][negative_idx])
 
-        for i, block in enumerate(reversed(self.bert.encoder.layer)):
-            if i < num_layers:
-                for param in block.parameters():
-                    param.requires_grad = True
+        text_embeddings_negative = torch.stack(text_embeddings_negative, dim=0) # (batch_size, max_len, hidden_dim)
+        attention_masks_negative = torch.stack(attention_masks_negative, dim=0) # (batch_size, max_len)
+        attention_masks_negative = self.generate_attention_mask(
+            task='itm',
+            query_len=queries.shape[1],
+            pad_mask=attention_masks_negative,
+            device=self.device
+        )
 
-        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        logger.info(f"Unfroze {num_layers} layers of BERT model. Trainable parameters: {trainable}")
+        text_embeddings_all = torch.cat([
+            question_output['last_hidden_state'], question_output['last_hidden_state'], text_embeddings_negative], dim=0)
+        
+        image_embeddings_all = torch.cat([
+            image_features, image_embeddings_negative, image_features], dim=0)
+        
+        attention_mask_all = torch.cat([
+            self.generate_attention_mask(
+                task='itm',
+                query_len=queries.shape[1],
+                pad_mask=question_tokens['attention_mask'],
+                device=self.device
+            ),
+            self.generate_attention_mask(
+                task='itm',
+                query_len=queries.shape[1],
+                pad_mask=question_tokens['attention_mask'],
+                device=self.device
+            ),
+            attention_masks_negative,
+        ], dim=0)
 
-    def encode_text(self, questions):
+        queries_itm = self.learned_queries.expand(image_embeddings_all.shape[0], -1, -1).clone()
+
+        queries_itm, _ = self.cross_modal_transformer(
+            image_embeddings_all,
+            queries_itm,
+            text_embeddings=text_embeddings_all,
+            attention_mask=attention_mask_all
+        )
+
+        # Perform itm head
+        itm_embeddings = self.itm_head(queries_itm) # (batch_size * 3, num_queries, 2)
+        logits = torch.mean(itm_embeddings, dim=1) # (batch_size * 3, 2)
+
+        itm_labels = torch.cat([
+            torch.ones(batch_size, dtype=torch.long),
+            torch.zeros(batch_size, dtype=torch.long),
+            torch.ones(batch_size, dtype=torch.long)
+        ], dim=0).to(self.device)
+
+        loss_itm = F.cross_entropy(logits, itm_labels)
+
+        # Image Grounded Text Generation
+        igt_input_ids = question_tokens['input_ids'].clone()
+        igt_input_ids[:, 0] = self.dec_token_id
+
+        labels = igt_input_ids.clone()
+        labels = labels.masked_fill(labels == self.tokenizer.pad_token_id, -100)
+
         if self.use_clip_for_text:
-            question_tokens = self.clip_processor(
-                text=questions,
-                padding='max_length',
-                truncation=True,
-                max_length=self.max_text_len,
-                return_tensors='pt'
-            ).to(self.device)
-
-            question_tokens = {key: val.to(self.device) for key, val in question_tokens.items()}
-
-            question_output = self.clip_model.text_model(
-                input_ids=question_tokens['input_ids'],
-                attention_mask=question_tokens['attention_mask'],
-                output_hidden_states=True,
-                return_dict=True
-            )
-        else:
-            question_tokens = self.tokenizer(
-                questions,
-                padding="max_length",
-                truncation=True,
-                max_length=self.max_text_len,
-                return_tensors="pt",
-            ).to(self.device)
-
-            question_tokens = {key: val.to(self.device) for key, val in question_tokens.items()}
-
-            question_output = self.bert(
-                input_ids=question_tokens['input_ids'],
+            igt_text_output = self.clip_model.text_model(
+                input_ids=igt_input_ids,
                 attention_mask=question_tokens['attention_mask'],
                 return_dict=True,
             )
+        else:
+            igt_text_output = self.bert(
+                input_ids=igt_input_ids,
+                attention_mask=question_tokens['attention_mask'],
+                return_dict=True,
+            )
+        
+        igt_attention_mask = self.generate_attention_mask(
+            task='igt',
+            query_len=queries.shape[1],
+            pad_mask=question_tokens['attention_mask'],
+            device=self.device
+        )
 
-        return question_output, question_tokens
-    
-    def generate_attention_mask(self, task: str, query_len: int, pad_mask: torch.Tensor, device: torch.device):
-        """
-        Generates an attention mask based on the task (itm, igt, itc) and padding mask.
+        queries_igt = self.learned_queries.expand(batch_size, -1, -1).clone()
 
-        Args:
-            task: 
-        """
+        queries_igt, text_embeddings_igt = self.cross_modal_transformer(
+            image_features,
+            queries_igt,
+            text_embeddings=igt_text_output['last_hidden_state'],
+            attention_mask=igt_attention_mask
+        )
+
+        text_logits = self.lm_head(text_embeddings_igt) # (batch_size, seq_len, vocab_size)
+
+        # Language modeling loss (shifted)
+        # Shift the logits and labels (predict next token)
+        shifted_logits = text_logits[:, :-1, :] 
+        shifted_labels = labels[:, 1:]
+
+        loss_igt = F.cross_entropy(
+            shifted_logits.reshape(-1, self.tokenizer.vocab_size),
+            shifted_labels.reshape(-1),
+            ignore_index=-100
+        )
+
+        # Answer Prediction
+        # Queries ITM: (batch_size, 32, 768)
+
+        max_pooled_queries = torch.max(queries_itm[:batch_size], dim=1)[0]
+
+        answer_logits = self.answer_head(max_pooled_queries)
+
+        answers = samples['answer']
+
+        dict = {'yes': 1, 'no': 0}
+
+        answers_labels = torch.tensor([
+            dict[answer] for answer in answers], dtype=torch.float, device=answer_logits.device).unsqueeze(1)
+        
+        loss_answer = F.binary_cross_entropy_with_logits(
+            answer_logits,
+            answers_labels
+        )
+
+        p = torch.sigmoid(answer_logits)
+
+        answer_accuracy = self.accuracy(p, answers_labels.int())
+
+        return {
+            'answer_accuracy': answer_accuracy,
+            'loss_answer': loss_answer,
+            'loss_itc': loss_itc,
+            'loss_itm': loss_itm,
+            'loss_igt': loss_igt,
+            'total_loss': loss_itc + loss_itm + loss_igt + loss_answer,
+            'answer_predictions': p.detach(),
+            'answer_labels': answers_labels.detach(),
+        }
