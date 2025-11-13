@@ -5,6 +5,8 @@ from torch.utils.data import Dataset, DataLoader
 
 from src.model.clip_vit import VisionEncoder
 
+from loguru import logger
+
 
 class VQADataset(Dataset):
     "Format: image - question - answer in text files."
@@ -59,4 +61,125 @@ class VQADataset(Dataset):
 
                 question_text = ' '.join(words[:-1]).rstrip(' ?')
 
+                image_path = os.path.join(self.images_dir, image)
 
+                if not os.path.exists(image_path):
+                    logger.warning(f"Image not found: {image_path}. Skipping sample.")
+                    continue
+
+                samples.append({
+                    "image_id": image,
+                    "question": question_text,
+                    "answer": answer,
+                    "image_path": image_path
+                })
+
+        return samples
+    
+    def __len__(self) -> int:
+        return len(self.samples)
+    
+    def __getitem__(self, index: int) -> dict:
+        """
+        Get a sample from the dataset.
+        
+        Returns: 
+            Dict with processed image features, question, and answer.
+        """
+        sample = self.samples[index]
+
+        image = self.vision_encoder.path_to_tensor(sample["image_path"])
+
+        output = {
+            "image": image["pixel_values"].squeeze(0),
+            "question": sample["question"],
+            "answer": sample["answer"],
+            "image_id": sample["image_id"]
+        }
+
+        return output
+    
+    def collate_fn(self, batch: list[dict]) -> dict:
+        batch_dict = {}
+
+        images = torch.stack([item["image"] for item in batch]).to(self.device)
+        image_input = {"pixel_values": images.to(self.device)}
+        batch_dict["image_input"] = image_input
+
+        batch_dict["question"] = [item["question"] for item in batch]
+        batch_dict["answer"] = [item["answer"] for item in batch]
+        batch_dict["image_id"] = [item["image_id"] for item in batch]
+
+        return batch_dict
+    
+def create_dataloader(
+        train_file: str,
+        val_file: str,
+        test_file: str,
+        images_dir: str,
+        image_model_name: str = "openai/clip-vit-large-patch14",
+        batch_size: int = 32,
+        device: torch.device = torch.device("cpu")
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Create DataLoaders for training, validation, and testing datasets.
+
+    Args:
+        train_file: path to the training data file.
+        val_file: path to the validation data file.
+        test_file: path to the testing data file.
+        images_dir: directory where images are stored.
+        image_model_name: model name for image processing.
+        batch_size: batch size for DataLoaders.
+        device: device to load the model on.
+
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader).
+    """
+    train_dataset = VQADataset(
+        data_file_path=train_file,
+        images_dir=images_dir,
+        image_model_name=image_model_name,
+        device=device
+    )
+
+    val_dataset = VQADataset(
+        data_file_path=val_file,
+        images_dir=images_dir,
+        image_model_name=image_model_name,
+        device=device
+    )
+
+    test_dataset = VQADataset(
+        data_file_path=test_file,
+        images_dir=images_dir,
+        image_model_name=image_model_name,
+        device=device
+    )
+
+    logger.info(f"Train samples: {len(train_dataset)}")
+    logger.info(f"Validation samples: {len(val_dataset)}")
+    logger.info(f"Test samples: {len(test_dataset)}")
+
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=train_dataset.collate_fn
+    )
+
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=val_dataset.collate_fn
+    )
+
+    test_dataloader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=test_dataset.collate_fn
+    )
+
+    return train_dataloader, val_dataloader, test_dataloader
