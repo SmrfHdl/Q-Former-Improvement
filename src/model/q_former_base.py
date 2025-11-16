@@ -10,7 +10,7 @@ from loguru import logger
 from loguru import logger
 
 
-class QFormer(nn.Module):
+class QFormerBase(nn.Module):
     """
     Q-Former architecture.
     """
@@ -26,7 +26,7 @@ class QFormer(nn.Module):
             clip_model_name: str = "openai/clip-vit-large-patch14",
             dropout_rate: float = 0.3,
             unfreeze_layers: int = 0):
-        super(QFormer, self).__init__()
+        super(QFormerBase, self).__init__()
 
         self.vision_dim = 1024 # ViT default
 
