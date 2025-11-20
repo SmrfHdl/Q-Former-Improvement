@@ -34,5 +34,19 @@ def run_single_experiment(model: str, use_clip: bool, encoder_name: str, gpu_id:
         "--model_name", model,
         "--use_clip_for_text", str(use_clip),
         "--gpu_device", str(gpu_id),
-
+        "--results_dir", str(results_dir),
+        "--models_dir", str(models_dir),
+        "--config_dir", str(config_dir),
+        "--data_dir", str(data_dir),
+        "--seed", str(seed),
+        "--run_id", str(run_id),
+        "--save_learning_curves", str(save_learning_curves)
     ]
+
+    log_file = log_dir / f"{model}_{encoder_name}_run{run_id}_gpu{gpu_id}.log"
+
+    with open(log_file, 'w') as f:
+        process = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
+        process.wait()
+
+    
