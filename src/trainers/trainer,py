@@ -5,8 +5,9 @@ import csv
 from pathlib import Path
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from datasets.dataset import create_dataloader
+import wandb
 from model_training.q_former_base import QFormerBaseLightning
 import argparse
 from sklearn.metrics import roc_auc_score
@@ -34,10 +35,13 @@ def train(model_name: str,
           data_dir: str = "../vqa_coco_dataset",
           seed: int = 42,
           run_id: int = 0,
-          save_learning_curve: bool = False):
-    logger.info("Starting run {run_id} with seed{seed}")
-    logger.info("Use_clip_for_text: {use_clip_for_text}")
-    logger.info("GPU device: {gpu_device}")
+          save_learning_curve: bool = False,
+          use_wandb: bool = True,
+          wandb_project: str = "q-former-improvement",
+          wandb_entity: str = None):
+    logger.info(f"Starting run {run_id} with seed {seed}")
+    logger.info(f"Use_clip_for_text: {use_clip_for_text}")
+    logger.info(f"GPU device: {gpu_device}")
 
     set_seed(seed)
 
@@ -53,6 +57,43 @@ def train(model_name: str,
     results_dir.mkdir(parents=True, exist_ok=True)
 
     encoder_type = "clip" if use_clip_for_text else "bert"
+
+    # Initialize wandb if enabled
+    wandb_logger = None
+    if use_wandb:
+        try:
+            # Create wandb run name
+            wandb_run_name = f"{model_name}_{encoder_type}_run{run_id}_seed{seed}"
+            
+            # Initialize wandb
+            wandb_logger = WandbLogger(
+                project=wandb_project,
+                entity=wandb_entity,
+                name=wandb_run_name,
+                save_dir=str(results_dir),
+                log_model="all",  # Log model checkpoints
+                tags=[model_name, encoder_type, f"run_{run_id}"]
+            )
+            
+            # Log hyperparameters and experiment config
+            wandb_logger.experiment.config.update({
+                **hyperparams,
+                "model_name": model_name,
+                "encoder_type": encoder_type,
+                "use_clip_for_text": use_clip_for_text,
+                "seed": seed,
+                "run_id": run_id,
+                "gpu_device": gpu_device,
+                "device": str(device)
+            })
+            
+            logger.info(f"Wandb initialized: {wandb_project}/{wandb_run_name}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize wandb: {e}. Continuing without wandb logging.")
+            wandb_logger = None
+    else:
+        logger.info("Wandb logging disabled")
+
     metrics_file = results_dir / f"{model_name}_{encoder_type}_metrics_run{run_id}.csv" if save_learning_curve else None
 
     summary_results_file = results_dir / f"{model_name}_{encoder_type}_summary_results.csv"
@@ -62,7 +103,7 @@ def train(model_name: str,
     train_file = os.path.join(data_dir, "vaq2.0.TrainImages.txt")
     val_file = os.path.join(data_dir, "vaq2.0.DevImages.txt")
     test_file = os.path.join(data_dir, "vaq2.0.TestImages.txt")
-    images_dir = os.path.join(data_dir, "val20140-resised")
+    images_dir = os.path.join(data_dir, "val2014-resised")
 
     for file_path in [train_file, val_file, test_file]:
         if not os.path.exists(file_path):
@@ -93,8 +134,8 @@ def train(model_name: str,
         raise ValueError(f"Unsupported model name: {model_name}")
 
     class MetricsCallBack(pl.Callback):
-        def _init_(self, metrics_file: Path, model_name: str):
-            super()._init_()
+        def __init__(self, metrics_file: Path, model_name: str):
+            super().__init__()
             self.metrics_file = metrics_file
             self.model_name = model_name
             
@@ -191,11 +232,16 @@ def train(model_name: str,
         default_hp_metric=False
     )
 
+    # Create list of loggers
+    loggers = [logger_ts]
+    if wandb_logger is not None:
+        loggers.append(wandb_logger)
+
     trainer = pl.Trainer(
         max_epochs=hyperparams.get('num_epochs', 100),
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=[gpu_device] if gpu_device is not None else None,
-        logger=logger_ts,
+        logger=loggers,
         callbacks=[early_stopping, metrics_callback, checkpoint_callback],
         log_every_n_steps=10,
         enable_progress_bar=True,
@@ -314,7 +360,16 @@ def train(model_name: str,
     best_model_path = checkpoint_callback.best_model_path
 
     # Save the best model with a standardized name
-    models_dir = Path(models_dir).mkdir(parents=True, exist_ok=True)
+    models_dir = Path(models_dir)
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    # Cleanup wandb
+    if use_wandb and wandb_logger is not None:
+        try:
+            wandb_logger.experiment.finish()
+            logger.info("Wandb run finished successfully")
+        except Exception as e:
+            logger.warning(f"Error finishing wandb run: {e}")
 
     # Return the test metrics for this run
     return {
@@ -361,8 +416,8 @@ if __name__ == "__main__":
     parser.add_argument("--config_dir", type=str, default="../configs",
                         help="Directory containing model configs (default: '../configs')")
 
-    parser.add_argument("--data_dir", type=str, default="../data/vqa",
-                        help="Directory containing dataset files (default: '../data/vqa')")
+    parser.add_argument("--data_dir", type=str, default="../vqa_coco_dataset",
+                        help="Directory containing dataset files (default: '../vqa_coco_dataset')")
 
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
@@ -372,6 +427,15 @@ if __name__ == "__main__":
 
     parser.add_argument("--save_learning_curves", type=str2bool, nargs='?', const=True, default=False,
                         help="Whether to save learning curves (default: False)")
+
+    parser.add_argument("--use_wandb", type=str2bool, nargs='?', const=True, default=True,
+                        help="Whether to use Weights & Biases logging (default: True)")
+
+    parser.add_argument("--wandb_project", type=str, default="q-former-improvement",
+                        help="Wandb project name (default: 'q-former-improvement')")
+
+    parser.add_argument("--wandb_entity", type=str, default=None,
+                        help="Wandb entity/username (default: None, uses default entity)")
 
     args = parser.parse_args()
 
@@ -385,5 +449,8 @@ if __name__ == "__main__":
         data_dir=args.data_dir,
         seed=args.seed,
         run_id=args.run_id,
-        save_learning_curves=args.save_learning_curves
+        save_learning_curves=args.save_learning_curves,
+        use_wandb=args.use_wandb,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity
     )

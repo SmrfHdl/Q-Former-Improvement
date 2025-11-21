@@ -2,6 +2,7 @@ import pytorch_lightning as pl
 from torch.optim import AdamW
 from model.q_former_base import QFormerBase
 import torch
+import wandb
 
 from loguru import logger
 

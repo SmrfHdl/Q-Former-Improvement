@@ -7,7 +7,6 @@ from layers.cross_modal_transformer import CrossModalTransformer
 from torchmetrics import Accuracy
 from clip_vit import VisionEncoder
 from loguru import logger
-from loguru import logger
 
 
 class QFormerBase(nn.Module):
@@ -194,7 +193,7 @@ class QFormerBase(nn.Module):
                 truncation=True,
                 max_length=self.max_text_len,
                 return_tensors='pt'
-            ).to(self.device)
+            )
 
             questions_tokens = {k: v.to(self.device) for k, v in questions_tokens.items()}
 
@@ -211,7 +210,7 @@ class QFormerBase(nn.Module):
                 truncation=True,
                 max_length=self.max_text_len,
                 return_tensors='pt'
-            ).to(self.device)
+            )
 
             question_tokens = {k: v.to(self.device) for k, v in question_tokens.items()}
 
