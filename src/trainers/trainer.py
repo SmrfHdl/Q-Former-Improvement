@@ -1,19 +1,26 @@
 import torch
 import os
+import sys
 import json
 import csv
 from pathlib import Path
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
-from datasets.dataset import create_dataloader
 import wandb
-from model_training.q_former_base import QFormerBaseLightning
 import argparse
 from sklearn.metrics import roc_auc_score
 import numpy as np
 import random
 from loguru import logger
+
+# Add src directory to Python path
+src_dir = Path(__file__).parent.parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+
+from datasets.dataset import create_dataloader
+from model_training.q_former_base import QFormerBaseLightning
 
 
 def set_seed(seed: int):
@@ -35,7 +42,7 @@ def train(model_name: str,
           data_dir: str = "../vqa_coco_dataset",
           seed: int = 42,
           run_id: int = 0,
-          save_learning_curve: bool = False,
+          save_learning_curves: bool = False,
           use_wandb: bool = True,
           wandb_project: str = "q-former-improvement",
           wandb_entity: str = None):
@@ -48,13 +55,33 @@ def train(model_name: str,
     gpu_device = gpu_device if torch.cuda.is_available() else None
     device = torch.device(f"cuda:{gpu_device}" if gpu_device is not None else "cpu")
 
-    config_path = os.path.join(config_dir, f"config_{model_name.lower()}.json")
+    # Convert config_dir to absolute path
+    config_dir_path = Path(config_dir).resolve()
+    
+    # Try to find the config file - handle both qformer_base and qformer naming
+    config_filename = f"config_{model_name.lower()}.json"
+    config_path = config_dir_path / config_filename
+    
+    # If the exact model config doesn't exist, try the base qformer config
+    if not config_path.exists():
+        config_path = config_dir_path / "config_qformer.json"
+    
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
     with open(config_path, 'r') as f:
         hyperparams = json.load(f)
 
     hyperparams['use_clip_for_text'] = use_clip_for_text
-    results_dir = Path(results_dir)
+    
+    # Convert all directory paths to absolute paths
+    results_dir = Path(results_dir).resolve()
     results_dir.mkdir(parents=True, exist_ok=True)
+    
+    models_dir = Path(models_dir).resolve()
+    models_dir.mkdir(parents=True, exist_ok=True)
+    
+    data_dir = str(Path(data_dir).resolve())
 
     encoder_type = "clip" if use_clip_for_text else "bert"
 
@@ -94,7 +121,7 @@ def train(model_name: str,
     else:
         logger.info("Wandb logging disabled")
 
-    metrics_file = results_dir / f"{model_name}_{encoder_type}_metrics_run{run_id}.csv" if save_learning_curve else None
+    metrics_file = results_dir / f"{model_name}_{encoder_type}_metrics_run{run_id}.csv" if save_learning_curves else None
 
     summary_results_file = results_dir / f"{model_name}_{encoder_type}_summary_results.csv"
 
@@ -246,7 +273,11 @@ def train(model_name: str,
         log_every_n_steps=10,
         enable_progress_bar=True,
         enable_model_summary=True,
-        enable_checkpointing=True
+        enable_checkpointing=True,
+        # gradient_clip_val is configured in model's configure_gradient_clipping() method
+        accumulate_grad_batches=1,
+        precision='16-mixed',  # Use mixed precision training for better stability
+        detect_anomaly=False  # Disable anomaly detection for performance (would catch NaN but slow)
     )
 
     trainer.fit(model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)

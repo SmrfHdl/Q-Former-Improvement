@@ -1,5 +1,6 @@
 import pytorch_lightning as pl
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 from model.q_former_base import QFormerBase
 import torch
 import wandb
@@ -60,7 +61,31 @@ class QFormerBaseLightning(pl.LightningModule):
     
     def training_step(self, batch: dict):
         output = self._common_step(batch, task="train")
-        return output['total_loss']
+        total_loss = output['total_loss']
+        
+        # Skip backward if loss is NaN or Inf to prevent weight corruption
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            logger.warning(f"NaN/Inf detected in total_loss, skipping backward pass")
+            # Return None to skip this batch completely
+            return None
+        
+        return total_loss
+    
+    def on_after_backward(self):
+        """Check for NaN/Inf in weights and gradients after backward pass."""
+        # Check projection layer weights for corruption
+        vision_proj_weight = self.q_former_base.vision_projection.weight
+        text_proj_weight = self.q_former_base.text_projection.weight
+        
+        if torch.isnan(vision_proj_weight).any() or torch.isinf(vision_proj_weight).any():
+            logger.error("CRITICAL: NaN/Inf detected in vision_projection weights after backward!")
+            # Zero out gradients to prevent optimizer step
+            self.q_former_base.zero_grad()
+            
+        if torch.isnan(text_proj_weight).any() or torch.isinf(text_proj_weight).any():
+            logger.error("CRITICAL: NaN/Inf detected in text_projection weights after backward!")
+            # Zero out gradients to prevent optimizer step
+            self.q_former_base.zero_grad()
     
     def validation_step(self, batch: dict):
         output = self._common_step(batch, task="val")
@@ -78,8 +103,38 @@ class QFormerBaseLightning(pl.LightningModule):
             weight_decay=self.hyperparams['weight_decay'],
             eps=self.hyperparams['eps']
         )
-
-        return optimizer
+        
+        # Add warm-up scheduler: linear warm-up for first 5000 steps (very conservative)
+        def lr_lambda(current_step: int):
+            warmup_steps = 5000
+            if current_step < warmup_steps:
+                return float(current_step) / float(max(1, warmup_steps))
+            return 1.0
+        
+        scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+        
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
+    
+    def configure_gradient_clipping(
+        self,
+        optimizer,
+        gradient_clip_val=None,
+        gradient_clip_algorithm=None
+    ):
+        """Configure gradient clipping to prevent gradient explosion."""
+        # Clip gradients by norm (max_norm=1.0 is quite aggressive but safe)
+        self.clip_gradients(
+            optimizer,
+            gradient_clip_val=1.0,
+            gradient_clip_algorithm="norm"
+        )
     
     def save_checkpoint(self, file_path: str):
         self.trainer.save_checkpoint(file_path)

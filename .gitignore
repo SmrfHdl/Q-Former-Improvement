@@ -14,3 +14,11 @@ vqa_coco_dataset/
 bla.py
 bla.ipynb
 utils/
+
+vqa_coco_dataset.zip
+
+logs/
+
+results/wandb/
+
+results/

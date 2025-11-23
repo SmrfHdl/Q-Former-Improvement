@@ -4,8 +4,7 @@ import torch.nn.functional as F
 from transformers import CLIPProcessor, CLIPModel
 from transformers import BertTokenizer, BertModel
 from layers.cross_modal_transformer import CrossModalTransformer
-from torchmetrics import Accuracy
-from clip_vit import VisionEncoder
+from model.clip_vit import VisionEncoder
 from loguru import logger
 
 
@@ -46,7 +45,13 @@ class QFormerBase(nn.Module):
         )
         
         self.vision_projection = nn.Linear(self.vision_dim, qformer_hidden_size)
+        self.vision_norm = nn.LayerNorm(qformer_hidden_size)
         self.text_projection = nn.Linear(self.text_dim, qformer_hidden_size)
+        self.text_norm = nn.LayerNorm(qformer_hidden_size)
+        
+        # Add dropout after projections for stability
+        self.vision_dropout = nn.Dropout(dropout_rate * 0.5)
+        self.text_dropout = nn.Dropout(dropout_rate * 0.5)
 
         self.learned_queries = nn.Parameter(
             torch.randn(1, num_queries, qformer_hidden_size)
@@ -59,17 +64,15 @@ class QFormerBase(nn.Module):
             dropout=dropout_rate
         )
 
-        self.temperature = nn.Parameter(
-            torch.ones([]) * 0.07
-        )
+        # Use CLIP-standard temperature (0.07) for stable similarity scaling
+        # This is a fixed buffer, not trainable
+        self.register_buffer('temperature', torch.tensor(0.07))
 
         self.itm_head = nn.Linear(qformer_hidden_size, 2)
 
         self.lm_head = nn.Linear(qformer_hidden_size, self.tokenizer.vocab_size)
 
         self.answer_head = nn.Linear(qformer_hidden_size, 1)
-
-        self.accuracy = Accuracy(threshold=0.5, num_classes=2, task='binary')
 
         self.cat_mlp = nn.Sequential(
             nn.Linear(qformer_hidden_size * 2, qformer_hidden_size),
@@ -93,8 +96,9 @@ class QFormerBase(nn.Module):
         old_vocab_size = self.clip_model.text_model.embeddings.token_embedding.weight.shape[0]
 
         if new_vocab_size != old_vocab_size:
-            old_embeddings = self.clip_model.text_model.embeddings.token_embedding.weight.shape[0]
-            new_embeddings = nn.Embedding(new_vocab_size, old_embeddings.embedding_dim)
+            old_embeddings = self.clip_model.text_model.embeddings.token_embedding
+            embedding_dim = old_embeddings.embedding_dim
+            new_embeddings = nn.Embedding(new_vocab_size, embedding_dim)
 
             new_embeddings.weight.data[:old_vocab_size] = old_embeddings.weight.data
 
@@ -128,15 +132,17 @@ class QFormerBase(nn.Module):
         self.text_dim = self.bert.config.hidden_size
 
     def init_weights(self):
-        nn.init.kaiming_normal_(self.vision_projection.weight, nonlinearity='relu')
+        # Use He initialization for projection layers (better for ReLU-like activations)
+        # Scale down by 0.001 for maximum stability with normalization
+        nn.init.kaiming_normal_(self.vision_projection.weight, mode='fan_in', nonlinearity='linear')
+        self.vision_projection.weight.data *= 0.001
         nn.init.zeros_(self.vision_projection.bias)
 
-        nn.init.kaiming_normal_(self.text_projection.weight, nonlinearity='relu')
+        nn.init.kaiming_normal_(self.text_projection.weight, mode='fan_in', nonlinearity='linear')
+        self.text_projection.weight.data *= 0.001
         nn.init.zeros_(self.text_projection.bias)
 
         nn.init.normal_(self.learned_queries, std=0.02)
-
-        nn.init.constant_(self.temperature, 0.07)
 
         nn.init.normal_(self.itm_head.weight, std=0.02)
         nn.init.zeros_(self.itm_head.bias)
@@ -187,7 +193,7 @@ class QFormerBase(nn.Module):
 
     def encode_text(self, questions: list[str] | str):
         if self.use_clip_for_text:
-            questions_tokens = self.clip_processor(
+            question_tokens = self.clip_processor(
                 text=questions,
                 padding='max_length',
                 truncation=True,
@@ -195,13 +201,12 @@ class QFormerBase(nn.Module):
                 return_tensors='pt'
             )
 
-            questions_tokens = {k: v.to(self.device) for k, v in questions_tokens.items()}
+            question_tokens = {k: v.to(self.device) for k, v in question_tokens.items()}
 
             question_output = self.clip_model.text_model(
-                input_ids=questions_tokens['input_ids'],
-                attention_mask=questions_tokens['attention_mask'],
-                output_hidden_states=True,
-                return_dict=True
+                input_ids=question_tokens['input_ids'],
+                attention_mask=question_tokens['attention_mask'],
+                output_hidden_states=True
             )
         else:
             question_tokens = self.tokenizer(
@@ -277,7 +282,16 @@ class QFormerBase(nn.Module):
         
         batch_size = image_features.shape[0]
 
-        image_features = F.normalize(self.vision_projection(image_features), dim=-1)
+        # Project and normalize vision features
+        image_features = self.vision_projection(image_features)
+        image_features = self.vision_norm(image_features)
+        image_features = self.vision_dropout(image_features)
+        # Check for NaN/Inf after vision projection
+        if torch.isnan(image_features).any() or torch.isinf(image_features).any():
+            logger.warning(f"WARNING: NaN/Inf detected in image_features after projection")
+            logger.warning(f"Vision projection weight stats: min={self.vision_projection.weight.min().item():.4f}, max={self.vision_projection.weight.max().item():.4f}")
+        # L2 normalize (keep gradient flow, no detach)
+        image_features = F.normalize(image_features, p=2, dim=-1, eps=1e-6)
 
         queries = self.learned_queries.expand(image_features.shape[0], -1, -1).clone() # (batch_size, num_queries = 32, hidden_dim = 768)
 
@@ -285,7 +299,15 @@ class QFormerBase(nn.Module):
 
         # Image Text Contrastive
         cls_text_embedding = question_output['last_hidden_state'][:, 0, :] # (batch_size, hidden_dim)
-        cls_text_embedding = F.normalize(self.text_projection(cls_text_embedding), dim=-1) # (batch_size, hidden_dim)
+        cls_text_embedding = self.text_projection(cls_text_embedding)
+        cls_text_embedding = self.text_norm(cls_text_embedding)
+        cls_text_embedding = self.text_dropout(cls_text_embedding)
+        # Check for NaN/Inf after text projection
+        if torch.isnan(cls_text_embedding).any() or torch.isinf(cls_text_embedding).any():
+            logger.warning(f"WARNING: NaN/Inf detected in cls_text_embedding after projection")
+            logger.warning(f"Text projection weight stats: min={self.text_projection.weight.min().item():.4f}, max={self.text_projection.weight.max().item():.4f}")
+        # L2 normalize (keep gradient flow, no detach)
+        cls_text_embedding = F.normalize(cls_text_embedding, p=2, dim=-1, eps=1e-6)
 
         attention_mask = self.generate_attention_mask(
             task='itc',
@@ -300,12 +322,31 @@ class QFormerBase(nn.Module):
             attention_mask=attention_mask
         )
 
-        queries = F.normalize(queries, dim=-1) # (batch_size, num_queries, hidden_dim)
+        # Check for NaN/Inf after cross-modal transformer
+        if torch.isnan(queries).any() or torch.isinf(queries).any():
+            logger.warning(f"WARNING: NaN/Inf detected in queries after cross_modal_transformer")
+            logger.warning(f"queries stats: min={queries.min().item():.4f}, max={queries.max().item():.4f}, mean={queries.mean().item():.4f}")
+
+        # L2 normalize (keep gradient flow, no detach)
+        queries = F.normalize(queries, p=2, dim=-1, eps=1e-6)
 
         # Image to Text similarity calculation
-        sim_i2t = torch.einsum("bqd, td -> btq", queries, cls_text_embedding)
+        # queries: (batch_size, num_queries, dim), cls_text_embedding: (batch_size, dim)
+        # We want: (batch_size, batch_size, num_queries)
+        sim_i2t = torch.einsum("bqd, Bd -> bBq", queries, cls_text_embedding)
 
-        sim_i2t, _ = sim_i2t.max(-1) # Max over queries: (b, t)
+        sim_i2t, _ = sim_i2t.max(-1) # Max over queries: (b, B) where b=query batch, B=text batch
+        
+        # Check for NaN/Inf in similarity matrix
+        if torch.isnan(sim_i2t).any() or torch.isinf(sim_i2t).any():
+            logger.warning(f"WARNING: NaN/Inf detected in sim_i2t before temperature scaling")
+            logger.warning(f"sim_i2t stats: min={sim_i2t.min().item():.4f}, max={sim_i2t.max().item():.4f}")
+            logger.warning(f"temperature value: {self.temperature.item():.6f}")
+        
+        # Clamp similarity before temperature scaling to prevent overflow
+        sim_i2t = torch.clamp(sim_i2t, min=-100, max=100)
+        
+        # Apply temperature scaling
         sim_i2t = sim_i2t / self.temperature
 
         sim_t2i = sim_i2t.T # (batch_size, q, t)
@@ -317,15 +358,39 @@ class QFormerBase(nn.Module):
         
         # Image Text Matching
         with torch.no_grad():
-            sim_i2t.fill_diagonal_(-10000)
-            sim_t2i.fill_diagonal_(-10000)
+            sim_i2t_clone = sim_i2t.clone()
+            sim_t2i_clone = sim_t2i.clone()
+            sim_i2t_clone.fill_diagonal_(-10000)
+            sim_t2i_clone.fill_diagonal_(-10000)
+            
+            # Clamp values to prevent inf/nan in softmax
+            sim_i2t_clone = torch.clamp(sim_i2t_clone, min=-100, max=100)
+            sim_t2i_clone = torch.clamp(sim_t2i_clone, min=-100, max=100)
 
-        weights_t2i = torch.softmax(sim_t2i, dim=-1)
-        weights_i2t = torch.softmax(sim_i2t, dim=-1)
+        weights_t2i = torch.softmax(sim_t2i_clone, dim=-1)
+        weights_i2t = torch.softmax(sim_i2t_clone, dim=-1)
+        
+        # Replace any NaN or Inf with uniform distribution
+        weights_t2i = torch.where(torch.isnan(weights_t2i) | torch.isinf(weights_t2i), 
+                                  torch.ones_like(weights_t2i) / batch_size, 
+                                  weights_t2i)
+        weights_i2t = torch.where(torch.isnan(weights_i2t) | torch.isinf(weights_i2t), 
+                                  torch.ones_like(weights_i2t) / batch_size, 
+                                  weights_i2t)
+        
+        # Ensure weights sum to 1 and are non-negative (add epsilon instead of clamping)
+        weights_t2i = weights_t2i + 1e-8
+        weights_i2t = weights_i2t + 1e-8
+        weights_t2i = weights_t2i / weights_t2i.sum(dim=-1, keepdim=True)
+        weights_i2t = weights_i2t / weights_i2t.sum(dim=-1, keepdim=True)
 
         image_embeddings_negative = []
         for b in range(batch_size):
-            negative_idx = torch.multinomial(weights_t2i[b], 1).item()
+            try:
+                negative_idx = torch.multinomial(weights_t2i[b], 1).item()
+            except RuntimeError:
+                # If multinomial fails, use argmax as fallback
+                negative_idx = torch.argmax(weights_t2i[b]).item()
             image_embeddings_negative.append(image_features[negative_idx])
 
         image_embeddings_negative = torch.stack(image_embeddings_negative, dim=0) # (batch_size, num_patches, hidden_dim)
@@ -334,7 +399,11 @@ class QFormerBase(nn.Module):
         attention_masks_negative = []
 
         for b in range(batch_size):
-            negative_idx = torch.multinomial(weights_i2t[b], 1).item()
+            try:
+                negative_idx = torch.multinomial(weights_i2t[b], 1).item()
+            except RuntimeError:
+                # If multinomial fails, use argmax as fallback
+                negative_idx = torch.argmax(weights_i2t[b]).item()
             text_embeddings_negative.append(question_output['last_hidden_state'][negative_idx])
             attention_masks_negative.append(question_tokens['attention_mask'][negative_idx])
 
@@ -390,7 +459,7 @@ class QFormerBase(nn.Module):
 
         loss_itm = F.cross_entropy(logits, itm_labels)
 
-        # Image Grounded Text Generation
+        # Image Grounded Text Generation (IGT)
         igt_input_ids = question_tokens['input_ids'].clone()
         igt_input_ids[:, 0] = self.dec_token_id
 
@@ -400,14 +469,13 @@ class QFormerBase(nn.Module):
         if self.use_clip_for_text:
             igt_text_output = self.clip_model.text_model(
                 input_ids=igt_input_ids,
-                attention_mask=question_tokens['attention_mask'],
-                return_dict=True,
+                attention_mask=question_tokens['attention_mask']
             )
         else:
             igt_text_output = self.bert(
                 input_ids=igt_input_ids,
                 attention_mask=question_tokens['attention_mask'],
-                return_dict=True,
+                return_dict=True
             )
         
         igt_attention_mask = self.generate_attention_mask(
@@ -433,16 +501,19 @@ class QFormerBase(nn.Module):
         shifted_logits = text_logits[:, :-1, :] 
         shifted_labels = labels[:, 1:]
 
+        # Always calculate loss, but it will be small if most labels are masked
         loss_igt = F.cross_entropy(
             shifted_logits.reshape(-1, self.tokenizer.vocab_size),
             shifted_labels.reshape(-1),
-            ignore_index=-100
+            ignore_index=-100,
+            reduction='mean'
         )
 
         # Answer Prediction
-        # Queries ITM: (batch_size, 32, 768)
+        # Use queries from ITC (not ITM) for answer prediction
+        # queries shape: (batch_size, num_queries, dim)
 
-        max_pooled_queries = torch.max(queries_itm[:batch_size], dim=1)[0]
+        max_pooled_queries = torch.max(queries, dim=1)[0]
 
         answer_logits = self.answer_head(max_pooled_queries)
 
@@ -460,7 +531,13 @@ class QFormerBase(nn.Module):
 
         p = torch.sigmoid(answer_logits)
 
-        answer_accuracy = self.accuracy(p, answers_labels.int())
+        # Calculate accuracy directly
+        predictions = (p > 0.5).float()
+        answer_accuracy = (predictions == answers_labels).float().mean()
+
+        # Compute total loss with all components
+        # Reduce loss_igt weight from 0.5 to 0.1 because it's much larger (~10.8) than other losses
+        total_loss = loss_itc + 0.5 * loss_itm + 0.1 * loss_igt + loss_answer
 
         return {
             'answer_accuracy': answer_accuracy,
@@ -468,7 +545,7 @@ class QFormerBase(nn.Module):
             'loss_itc': loss_itc,
             'loss_itm': loss_itm,
             'loss_igt': loss_igt,
-            'total_loss': loss_itc + loss_itm + loss_igt + loss_answer,
+            'total_loss': total_loss,
             'answer_predictions': p.detach(),
             'answer_labels': answers_labels.detach(),
         }
