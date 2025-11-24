@@ -31,8 +31,12 @@ def run_single_experiment(model: str, use_clip: bool, encoder_name: str, gpu_id:
         writer = csv.writer(f)
         writer.writerow([model, encoder_name, run_id, seed, gpu_id, "RUNNING", '', ''])
 
+    # Get the absolute path to the trainer script
+    script_dir = Path(__file__).parent
+    trainer_path = script_dir.parent / "src" / "trainers" / "trainer.py"
+    
     cmd = [
-        "uv", "run", "../trainers/trainer.py",
+        "uv", "run", str(trainer_path),
         "--model_name", model,
         "--use_clip_for_text", str(use_clip),
         "--gpu_device", str(gpu_id),
@@ -130,14 +134,14 @@ def run_gpu_experiments_sequentially(groups: list[dict], num_runs: int, base_see
 def main():
     parser = argparse.ArgumentParser(description="Run multiple experiments with multiple seeds")
 
-    parser.add_argument("--results_dir", type=str, default="../results", 
-                        help="Directory to save results (default: '../results')")
-    parser.add_argument("--models_dir", type=str, default="../saved_models",
-                        help="Directory to save models (default: '../saved_models')")
-    parser.add_argument("--config_dir", type=str, default="../configs",
-                        help="Directory containing model configs (default: '../configs')")
-    parser.add_argument("--data_dir", type=str, default="../vqa_coco_dataset",
-                        help="Directory containing dataset files (default: '../vqa_coco_dataset')")
+    parser.add_argument("--results_dir", type=str, default="results", 
+                        help="Directory to save results (default: 'results')")
+    parser.add_argument("--models_dir", type=str, default="saved_models",
+                        help="Directory to save models (default: 'saved_models')")
+    parser.add_argument("--config_dir", type=str, default="configs",
+                        help="Directory containing model configs (default: 'configs')")
+    parser.add_argument("--data_dir", type=str, default="vqa_coco_dataset",
+                        help="Directory containing dataset files (default: 'vqa_coco_dataset')")
     
     parser.add_argument("--gpus", type=str, default="0",
                         help="Comma-separated list of GPU device IDs to use (default: '0')")
@@ -228,8 +232,14 @@ def main():
         writer = csv.writer(f)
         writer.writerow(['model', 'encoder', 'run_id', 'seed', 'gpu', 'status', 'test_accuracy', 'test_auc'])
 
-    config_dir = args.config_dir
-    data_dir = args.data_dir
+    # Convert config_dir and data_dir to absolute paths
+    config_dir = Path(args.config_dir)
+    if not config_dir.is_absolute():
+        config_dir = (Path.cwd() / config_dir).resolve()
+    
+    data_dir = Path(args.data_dir)
+    if not data_dir.is_absolute():
+        data_dir = (Path.cwd() / data_dir).resolve()
 
     gpu_groups = {}
     for group in experiment_groups:

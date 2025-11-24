@@ -16,6 +16,7 @@ bla.ipynb
 utils/
 
 results/
+logs/
 
 *.csv
 *.zip

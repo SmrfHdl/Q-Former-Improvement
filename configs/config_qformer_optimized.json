@@ -1,0 +1,28 @@
+{
+  "lr": 5e-5,
+  "eps": 1e-8,
+  "seed": 78,
+  "betas": [0.9, 0.98],
+  "num_heads": 4,
+  "batch_size": 48,
+  "blocks_num": 6,
+  "num_epochs": 50,
+  "num_queries": 32,
+  "dropout_rate": 0.2,
+  "weight_decay": 0.05,
+  "sequence_size": 24,
+  "unfreeze_layers": 2,
+  "use_clip_for_text": true,
+  "qformer_hidden_size": 768,
+  "gradient_clip_norm": 1.0,
+  "warmup_steps": 500,
+  "comments": {
+    "lr": "Tăng từ 1e-7 lên 5e-5 để học nhanh hơn",
+    "batch_size": "Giảm từ 150 xuống 48 để tăng số lần update",
+    "num_heads": "Tăng từ 2 lên 4 để model capacity cao hơn",
+    "blocks_num": "Tăng từ 5 lên 6 để model học sâu hơn",
+    "dropout_rate": "Giảm từ 0.3 xuống 0.2 vì model chưa overfit",
+    "sequence_size": "Tăng từ 14 lên 24 để capture context tốt hơn",
+    "unfreeze_layers": "Unfreeze 2 layers cuối của CLIP để fine-tune"
+  }
+}

@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
-from multi_head_cross_attention import MultiHeadCrossAttentionLayer
-from multi_head_self_attention import MultiHeadSelfAttentionLayer
-from feed_forward import FeedForwardLayer
+from layers.multi_head_cross_attention import MultiHeadCrossAttentionLayer
+from layers.multi_head_self_attention import MultiHeadSelfAttentionLayer
+from layers.feed_forward import FeedForwardLayer
 
 from torch.nn.init import trunc_normal_
 
@@ -48,7 +48,7 @@ class CrossModalTransformerLayer(nn.Module):
         key_value_norm = self.norm_kv_cross(image_features)
 
         queries = queries + self.dropout_cross(
-            self.mhca(q=query_norm, k=key_value_norm, v=key_value_norm))
+            self.mhca(query_norm, key_value_norm, key_value_norm))
         
         combined = torch.cat([queries, text_embeddings], dim=1)
 
