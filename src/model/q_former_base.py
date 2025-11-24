@@ -536,8 +536,10 @@ class QFormerBase(nn.Module):
         answer_accuracy = (predictions == answers_labels).float().mean()
 
         # Compute total loss with all components
-        # Reduce loss_igt weight from 0.5 to 0.1 because it's much larger (~10.8) than other losses
-        total_loss = loss_itc + 0.5 * loss_itm + 0.1 * loss_igt + loss_answer
+        # Dynamically weight losses based on their magnitudes to prevent dominance
+        # IGT loss (~11) needs very small weight (0.05) to be comparable to other losses
+        # ITC loss (~5) needs 0.3 weight to match answer/ITM losses (~0.7)
+        total_loss = 0.3 * loss_itc + 0.5 * loss_itm + 0.05 * loss_igt + 1.0 * loss_answer
 
         return {
             'answer_accuracy': answer_accuracy,
