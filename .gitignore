@@ -20,3 +20,5 @@ logs/
 
 *.csv
 *.zip
+
+.github/
