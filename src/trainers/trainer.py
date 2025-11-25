@@ -21,6 +21,7 @@ if str(src_dir) not in sys.path:
 
 from datasets.dataset import create_dataloader
 from model_training.q_former_base import QFormerBaseLightning
+from model_training.q_former_improved import QFormerImprovedLightning
 
 
 def set_seed(seed: int):
@@ -152,11 +153,11 @@ def train(model_name: str,
             hyperparams=hyperparams,
             device=device
         )
-    # elif model_name.lower() == "qformer_improved":: # TODO: Implement improved Q-Former
-    #     model = QFormerImprovedLightning(
-    #         hyperparams=hyperparams,
-    #         device=device
-    #     )
+    elif model_name.lower() == "qformer_improved":
+        model = QFormerImprovedLightning(
+            hyperparams=hyperparams,
+            device=device
+        )
     else:
         raise ValueError(f"Unsupported model name: {model_name}")
 
