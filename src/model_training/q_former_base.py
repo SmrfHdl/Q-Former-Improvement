@@ -27,6 +27,29 @@ class QFormerBaseLightning(pl.LightningModule):
             unfreeze_layers=hyperparams["unfreeze_layers"],
             device=device
         )
+        
+        # Debug: Log trainable parameters
+        self._log_trainable_params()
+    
+    def _log_trainable_params(self):
+        """Log which parameters are trainable."""
+        total_params = 0
+        trainable_params = 0
+        
+        logger.info("=" * 60)
+        logger.info("TRAINABLE PARAMETERS DEBUG:")
+        
+        for name, param in self.named_parameters():
+            total_params += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+                if 'learned_queries' in name or 'projection' in name or 'head' in name:
+                    logger.info(f"{name}: {param.shape}, requires_grad=True")
+        
+        logger.info(f"Total params: {total_params:,}")
+        logger.info(f"Trainable params: {trainable_params:,}")
+        logger.info(f"Trainable ratio: {100*trainable_params/total_params:.2f}%")
+        logger.info("=" * 60)
 
     def forward(self, samples: dict):
         return self.q_former_base(samples)
@@ -73,18 +96,51 @@ class QFormerBaseLightning(pl.LightningModule):
     
     def on_after_backward(self):
         """Check for NaN/Inf in weights and gradients after backward pass."""
+        # Debug: Log gradient statistics for key parameters
+        if self.global_step % 50 == 0:  # Log every 50 steps
+            grad_info = []
+            
+            # Check learned_queries gradient
+            if self.q_former_base.learned_queries.grad is not None:
+                q_grad = self.q_former_base.learned_queries.grad
+                grad_info.append(f"queries_grad: mean={q_grad.mean().item():.6f}, max={q_grad.abs().max().item():.6f}")
+            else:
+                grad_info.append("queries_grad: None!")
+            
+            # Check vision_projection gradient
+            if self.q_former_base.vision_projection.weight.grad is not None:
+                v_grad = self.q_former_base.vision_projection.weight.grad
+                grad_info.append(f"vision_proj_grad: mean={v_grad.mean().item():.6f}, max={v_grad.abs().max().item():.6f}")
+            else:
+                grad_info.append("vision_proj_grad: None!")
+                
+            # Check answer_head gradient
+            if self.q_former_base.answer_head.weight.grad is not None:
+                a_grad = self.q_former_base.answer_head.weight.grad
+                grad_info.append(f"answer_head_grad: mean={a_grad.mean().item():.6f}, max={a_grad.abs().max().item():.6f}")
+            else:
+                grad_info.append("answer_head_grad: None!")
+            
+            # Check cross_modal_transformer gradient (first layer)
+            first_layer = self.q_former_base.cross_modal_transformer.layers[0]
+            if first_layer.mhca.linear_q.weight.grad is not None:
+                cm_grad = first_layer.mhca.linear_q.weight.grad
+                grad_info.append(f"cross_attn_grad: mean={cm_grad.mean().item():.6f}, max={cm_grad.abs().max().item():.6f}")
+            else:
+                grad_info.append("cross_attn_grad: None!")
+                
+            logger.info(f"[GRAD DEBUG Step {self.global_step}] " + " | ".join(grad_info))
+        
         # Check projection layer weights for corruption
         vision_proj_weight = self.q_former_base.vision_projection.weight
         text_proj_weight = self.q_former_base.text_projection.weight
         
         if torch.isnan(vision_proj_weight).any() or torch.isinf(vision_proj_weight).any():
             logger.error("CRITICAL: NaN/Inf detected in vision_projection weights after backward!")
-            # Zero out gradients to prevent optimizer step
             self.q_former_base.zero_grad()
             
         if torch.isnan(text_proj_weight).any() or torch.isinf(text_proj_weight).any():
             logger.error("CRITICAL: NaN/Inf detected in text_projection weights after backward!")
-            # Zero out gradients to prevent optimizer step
             self.q_former_base.zero_grad()
     
     def validation_step(self, batch: dict):
@@ -104,9 +160,10 @@ class QFormerBaseLightning(pl.LightningModule):
             eps=self.hyperparams['eps']
         )
         
-        # Add warm-up scheduler: linear warm-up for first 5000 steps (very conservative)
+        # Add warm-up scheduler: linear warm-up for first 500 steps (reasonable for typical VQA datasets)
+        # With batch_size=48 and ~10k samples, 500 steps = ~2.4 epochs of warmup
         def lr_lambda(current_step: int):
-            warmup_steps = 5000
+            warmup_steps = self.hyperparams.get('warmup_steps', 500)  # Use config or default 500
             if current_step < warmup_steps:
                 return float(current_step) / float(max(1, warmup_steps))
             return 1.0

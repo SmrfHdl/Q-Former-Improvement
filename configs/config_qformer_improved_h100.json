@@ -17,5 +17,13 @@
   "use_clip_for_text": true,
   "gradient_clip_norm": 1.0,
   "warmup_steps": 500,
-  "patience": 15
+  "patience": 15,
+  "seed": 42,
+
+  "comments": {
+    "batch_size": "48 - slightly smaller due to hierarchical model memory usage",
+    "num_relation_queries": "48 instead of 64 - balanced for N^2 pairwise computation",
+    "patience": "15 - more patience for complex hierarchical model to converge"
+  }
 }
+
