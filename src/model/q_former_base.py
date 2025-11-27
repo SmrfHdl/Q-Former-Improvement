@@ -10,7 +10,7 @@ from loguru import logger
 
 class QFormerBase(nn.Module):
     """
-    Q-Former architecture.
+    Q-Former architecture with improved regularization and learnable temperature.
     """
     def __init__(
             self, 
@@ -23,7 +23,20 @@ class QFormerBase(nn.Module):
             use_clip_for_text: bool = True,
             clip_model_name: str = "openai/clip-vit-large-patch14",
             dropout_rate: float = 0.3,
-            unfreeze_layers: int = 0):
+            unfreeze_layers: int = 0,
+            # New parameters for v2 improvements
+            learnable_temperature: bool = True,
+            initial_temperature: float = 0.07,
+            temperature_min: float = 0.01,
+            temperature_max: float = 0.5,
+            label_smoothing_answer: float = 0.1,
+            label_smoothing_itc: float = 0.1,
+            label_smoothing_itm: float = 0.1,
+            loss_weight_itc: float = 0.2,
+            loss_weight_itm: float = 0.3,
+            loss_weight_igt: float = 0.0,
+            loss_weight_answer: float = 1.0,
+            stochastic_depth_rate: float = 0.1):
         super(QFormerBase, self).__init__()
 
         self.vision_dim = 1024 # ViT default
@@ -32,6 +45,19 @@ class QFormerBase(nn.Module):
         self.max_text_len = sequence_size
         self.use_clip_for_text = use_clip_for_text
         self.unfreeze_layers = unfreeze_layers
+        
+        # Store loss weights and label smoothing
+        self.label_smoothing_answer = label_smoothing_answer
+        self.label_smoothing_itc = label_smoothing_itc
+        self.label_smoothing_itm = label_smoothing_itm
+        self.loss_weight_itc = loss_weight_itc
+        self.loss_weight_itm = loss_weight_itm
+        self.loss_weight_igt = loss_weight_igt
+        self.loss_weight_answer = loss_weight_answer
+        
+        # Temperature bounds for clamping
+        self.temperature_min = temperature_min
+        self.temperature_max = temperature_max
 
         if self.use_clip_for_text:
             self._setup_clip_model(clip_model_name, unfreeze_layers)
@@ -49,9 +75,12 @@ class QFormerBase(nn.Module):
         self.text_projection = nn.Linear(self.text_dim, qformer_hidden_size)
         self.text_norm = nn.LayerNorm(qformer_hidden_size)
         
-        # Add dropout after projections for stability
-        self.vision_dropout = nn.Dropout(dropout_rate * 0.5)
-        self.text_dropout = nn.Dropout(dropout_rate * 0.5)
+        # Increased dropout for regularization (v2 improvement)
+        self.vision_dropout = nn.Dropout(dropout_rate)
+        self.text_dropout = nn.Dropout(dropout_rate)
+        
+        # Additional feature dropout for better regularization
+        self.feature_dropout = nn.Dropout(dropout_rate * 0.5)
 
         self.learned_queries = nn.Parameter(
             torch.randn(1, num_queries, qformer_hidden_size)
@@ -61,22 +90,43 @@ class QFormerBase(nn.Module):
             qformer_hidden_size,
             num_heads,
             blocks_num,
-            dropout=dropout_rate
+            dropout=dropout_rate,
+            stochastic_depth_rate=stochastic_depth_rate
         )
 
-        # Use CLIP-standard temperature (0.07) for stable similarity scaling
-        # This is a fixed buffer, not trainable
-        self.register_buffer('temperature', torch.tensor(0.07))
+        # v2 IMPROVEMENT: Learnable temperature for ITC loss
+        # This allows the model to find the optimal temperature during training
+        if learnable_temperature:
+            # Initialize log_temperature so that exp(log_temp) = initial_temperature
+            self.log_temperature = nn.Parameter(torch.log(torch.tensor(initial_temperature)))
+            logger.info(f"Using LEARNABLE temperature, initial value: {initial_temperature}")
+        else:
+            self.register_buffer('log_temperature', torch.log(torch.tensor(initial_temperature)))
+            logger.info(f"Using FIXED temperature: {initial_temperature}")
+        
+        self.learnable_temperature = learnable_temperature
 
-        self.itm_head = nn.Linear(qformer_hidden_size, 2)
+        self.itm_head = nn.Sequential(
+            nn.Linear(qformer_hidden_size, qformer_hidden_size // 2),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(qformer_hidden_size // 2, 2)
+        )
 
         self.lm_head = nn.Linear(qformer_hidden_size, self.tokenizer.vocab_size)
 
-        self.answer_head = nn.Linear(qformer_hidden_size, 1)
+        # Improved answer head with more capacity and dropout
+        self.answer_head = nn.Sequential(
+            nn.Linear(qformer_hidden_size, qformer_hidden_size // 2),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(qformer_hidden_size // 2, 1)
+        )
 
         self.cat_mlp = nn.Sequential(
             nn.Linear(qformer_hidden_size * 2, qformer_hidden_size),
-            nn.ReLU(),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(qformer_hidden_size, 1)
         )
 
@@ -339,24 +389,29 @@ class QFormerBase(nn.Module):
 
         sim_i2t, _ = sim_i2t.max(-1) # Max over queries: (b, B) where b=query batch, B=text batch
         
+        # v2 IMPROVEMENT: Use learnable temperature with clamping for stability
+        temperature = torch.exp(self.log_temperature)
+        temperature = torch.clamp(temperature, min=self.temperature_min, max=self.temperature_max)
+        
         # Check for NaN/Inf in similarity matrix
         if torch.isnan(sim_i2t).any() or torch.isinf(sim_i2t).any():
             logger.warning(f"WARNING: NaN/Inf detected in sim_i2t before temperature scaling")
             logger.warning(f"sim_i2t stats: min={sim_i2t.min().item():.4f}, max={sim_i2t.max().item():.4f}")
-            logger.warning(f"temperature value: {self.temperature.item():.6f}")
+            logger.warning(f"temperature value: {temperature.item():.6f}")
         
         # Clamp similarity before temperature scaling to prevent overflow
         sim_i2t = torch.clamp(sim_i2t, min=-100, max=100)
         
         # Apply temperature scaling
-        sim_i2t = sim_i2t / self.temperature
+        sim_i2t = sim_i2t / temperature
 
         sim_t2i = sim_i2t.T # (batch_size, q, t)
 
         targets = torch.arange(batch_size, device=image_features.device, dtype=int)
 
-        loss_itc = (F.cross_entropy(sim_i2t, targets, label_smoothing=0.1) +
-                    F.cross_entropy(sim_t2i, targets, label_smoothing=0.1)) / 2
+        # v2 IMPROVEMENT: Use configurable label smoothing
+        loss_itc = (F.cross_entropy(sim_i2t, targets, label_smoothing=self.label_smoothing_itc) +
+                    F.cross_entropy(sim_t2i, targets, label_smoothing=self.label_smoothing_itc)) / 2
         
         # Image Text Matching
         with torch.no_grad():
@@ -459,7 +514,8 @@ class QFormerBase(nn.Module):
             torch.zeros(batch_size, dtype=torch.long)   # FIX: Negative: (image, wrong_text)
         ], dim=0).to(self.device)
 
-        loss_itm = F.cross_entropy(logits, itm_labels)
+        # v2 IMPROVEMENT: Use configurable label smoothing for ITM
+        loss_itm = F.cross_entropy(logits, itm_labels, label_smoothing=self.label_smoothing_itm)
 
         # Image Grounded Text Generation (IGT)
         igt_input_ids = question_tokens['input_ids'].clone()
@@ -526,22 +582,34 @@ class QFormerBase(nn.Module):
         answers_labels = torch.tensor([
             dict[answer] for answer in answers], dtype=torch.float, device=answer_logits.device).unsqueeze(1)
         
+        # v2 IMPROVEMENT: Label smoothing for binary classification
+        # Smooth labels: 0 -> label_smoothing/2, 1 -> 1 - label_smoothing/2
+        if self.label_smoothing_answer > 0:
+            smoothed_labels = answers_labels * (1 - self.label_smoothing_answer) + self.label_smoothing_answer / 2
+        else:
+            smoothed_labels = answers_labels
+            
         loss_answer = F.binary_cross_entropy_with_logits(
             answer_logits,
-            answers_labels
+            smoothed_labels
         )
 
         p = torch.sigmoid(answer_logits)
 
-        # Calculate accuracy directly
+        # Calculate accuracy directly (use original labels for accuracy)
         predictions = (p > 0.5).float()
         answer_accuracy = (predictions == answers_labels).float().mean()
 
-        # Compute total loss with all components
-        # Dynamically weight losses based on their magnitudes to prevent dominance
-        # IGT loss (~11) needs very small weight (0.05) to be comparable to other losses
-        # ITC loss (~5) needs 0.3 weight to match answer/ITM losses (~0.7)
-        total_loss = 0.3 * loss_itc + 0.5 * loss_itm + 0.05 * loss_igt + 1.0 * loss_answer
+        # v2 IMPROVEMENT: Use configurable loss weights
+        # IGT is disabled by default (0.0) as it causes severe overfitting
+        total_loss = (self.loss_weight_itc * loss_itc + 
+                      self.loss_weight_itm * loss_itm + 
+                      self.loss_weight_igt * loss_igt + 
+                      self.loss_weight_answer * loss_answer)
+        
+        # Get current temperature for logging
+        temperature = torch.exp(self.log_temperature)
+        temperature = torch.clamp(temperature, min=self.temperature_min, max=self.temperature_max)
 
         return {
             'answer_accuracy': answer_accuracy,
@@ -552,4 +620,5 @@ class QFormerBase(nn.Module):
             'total_loss': total_loss,
             'answer_predictions': p.detach(),
             'answer_labels': answers_labels.detach(),
+            'temperature': temperature.detach(),  # Log current temperature
         }

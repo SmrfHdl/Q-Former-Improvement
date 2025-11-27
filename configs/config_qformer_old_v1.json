@@ -1,0 +1,19 @@
+{
+  "qformer_hidden_size": 768,
+  "blocks_num": 6,
+  "num_heads": 12,
+  "num_queries": 32,
+  "num_epochs": 30,
+  "batch_size": 48,
+  "lr": 5e-4,
+  "betas": [0.9, 0.999],
+  "dropout_rate": 0.1,
+  "weight_decay": 0.01,
+  "eps": 1e-8,
+  "sequence_size": 32,
+  "unfreeze_layers": 0,
+  "use_clip_for_text": true,
+  "gradient_clip_norm": 1.0,
+  "warmup_steps": 100,
+  "patience": 10
+}

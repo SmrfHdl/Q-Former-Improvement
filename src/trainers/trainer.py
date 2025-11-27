@@ -139,13 +139,16 @@ def train(model_name: str,
     if not os.path.exists(images_dir):
         raise FileNotFoundError(f"Images directory not found: {images_dir}")
     
+    # v2 IMPROVEMENT: Pass augmentation parameters
     train_dataloader, val_dataloader, test_dataloader = create_dataloader(
         train_file=train_file,
         val_file=val_file,
         test_file=test_file,
         images_dir=images_dir,
         batch_size=hyperparams['batch_size'],
-        device=device
+        device=device,
+        use_augmentation=hyperparams.get('use_data_augmentation', False),
+        augmentation_prob=hyperparams.get('augmentation_prob', 0.5)
     )
 
     if model_name.lower() == "qformer_base":

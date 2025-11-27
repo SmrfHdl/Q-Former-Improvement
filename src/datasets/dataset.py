@@ -1,7 +1,10 @@
 import os
+import random
 
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image
 
 from src.model.clip_vit import VisionEncoder
 
@@ -17,6 +20,8 @@ class VQADataset(Dataset):
             image_model_name: str = "openai/clip-vit-large-patch14",
             max_length: int = 14,
             device: torch.device = torch.device("cpu"),
+            use_augmentation: bool = False,
+            augmentation_prob: float = 0.5,
     ):
         """
         Initialize the dataset.
@@ -27,16 +32,32 @@ class VQADataset(Dataset):
             image_model_name: model name for image processing.
             max_length: maximum length for tokenized text.
             device: device to load the model on.
+            use_augmentation: whether to use data augmentation (for training).
+            augmentation_prob: probability of applying augmentation.
         """
         self.images_dir = images_dir
         self.max_length = max_length
         self.device = device
+        self.use_augmentation = use_augmentation
+        self.augmentation_prob = augmentation_prob
 
         self.vision_encoder = VisionEncoder(
             device=device,
             model_name=image_model_name,
             only_use_processor=True
         )
+        
+        # v2 IMPROVEMENT: Data augmentation for training
+        if use_augmentation:
+            self.augment_transform = transforms.Compose([
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomRotation(degrees=10),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+                transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+            ])
+            logger.info(f"Data augmentation enabled with prob={augmentation_prob}")
+        else:
+            self.augment_transform = None
 
         self.samples = self._load_data_file(data_file_path)
 
@@ -88,7 +109,19 @@ class VQADataset(Dataset):
         """
         sample = self.samples[index]
 
-        image = self.vision_encoder.path_to_tensor(sample["image_path"])
+        # v2 IMPROVEMENT: Apply data augmentation if enabled
+        if self.use_augmentation and self.augment_transform is not None:
+            if random.random() < self.augmentation_prob:
+                # Load image, apply augmentation, then process
+                pil_image = Image.open(sample["image_path"]).convert("RGB")
+                pil_image = self.augment_transform(pil_image)
+                # Process augmented image
+                image = self.vision_encoder.processor(images=pil_image, return_tensors="pt")
+                image = image.to(self.device)
+            else:
+                image = self.vision_encoder.path_to_tensor(sample["image_path"])
+        else:
+            image = self.vision_encoder.path_to_tensor(sample["image_path"])
 
         output = {
             "image": image["pixel_values"].squeeze(0),
@@ -119,7 +152,9 @@ def create_dataloader(
         images_dir: str,
         image_model_name: str = "openai/clip-vit-large-patch14",
         batch_size: int = 32,
-        device: torch.device = torch.device("cpu")
+        device: torch.device = torch.device("cpu"),
+        use_augmentation: bool = False,
+        augmentation_prob: float = 0.5
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """
     Create DataLoaders for training, validation, and testing datasets.
@@ -132,29 +167,37 @@ def create_dataloader(
         image_model_name: model name for image processing.
         batch_size: batch size for DataLoaders.
         device: device to load the model on.
+        use_augmentation: whether to use data augmentation for training.
+        augmentation_prob: probability of applying augmentation.
 
     Returns:
         Tuple of (train_loader, val_loader, test_loader).
     """
+    # v2 IMPROVEMENT: Apply augmentation only to training set
     train_dataset = VQADataset(
         data_file_path=train_file,
         images_dir=images_dir,
         image_model_name=image_model_name,
-        device=device
+        device=device,
+        use_augmentation=use_augmentation,
+        augmentation_prob=augmentation_prob
     )
 
+    # No augmentation for validation and test
     val_dataset = VQADataset(
         data_file_path=val_file,
         images_dir=images_dir,
         image_model_name=image_model_name,
-        device=device
+        device=device,
+        use_augmentation=False
     )
 
     test_dataset = VQADataset(
         data_file_path=test_file,
         images_dir=images_dir,
         image_model_name=image_model_name,
-        device=device
+        device=device,
+        use_augmentation=False
     )
 
     logger.info(f"Train samples: {len(train_dataset)}")

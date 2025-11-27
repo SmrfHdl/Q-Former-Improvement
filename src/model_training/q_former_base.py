@@ -1,9 +1,10 @@
 import pytorch_lightning as pl
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, SequentialLR
 from model.q_former_base import QFormerBase
 import torch
 import wandb
+import math
 
 from loguru import logger
 
@@ -25,7 +26,20 @@ class QFormerBaseLightning(pl.LightningModule):
             dropout_rate=hyperparams["dropout_rate"],
             use_clip_for_text=hyperparams["use_clip_for_text"],
             unfreeze_layers=hyperparams["unfreeze_layers"],
-            device=device
+            device=device,
+            # v2 improvements - pass new hyperparameters
+            learnable_temperature=hyperparams.get("learnable_temperature", True),
+            initial_temperature=hyperparams.get("initial_temperature", 0.07),
+            temperature_min=hyperparams.get("temperature_min", 0.01),
+            temperature_max=hyperparams.get("temperature_max", 0.5),
+            label_smoothing_answer=hyperparams.get("label_smoothing_answer", 0.1),
+            label_smoothing_itc=hyperparams.get("label_smoothing_itc", 0.1),
+            label_smoothing_itm=hyperparams.get("label_smoothing_itm", 0.1),
+            loss_weight_itc=hyperparams.get("loss_weight_itc", 0.2),
+            loss_weight_itm=hyperparams.get("loss_weight_itm", 0.3),
+            loss_weight_igt=hyperparams.get("loss_weight_igt", 0.0),
+            loss_weight_answer=hyperparams.get("loss_weight_answer", 1.0),
+            stochastic_depth_rate=hyperparams.get("stochastic_depth_rate", 0.1)
         )
         
         # Debug: Log trainable parameters
@@ -70,6 +84,11 @@ class QFormerBaseLightning(pl.LightningModule):
         self.log(f"{task}_total_loss", output['total_loss'], prog_bar=True, on_step=True, on_epoch=True, logger=True,
                  batch_size=self.hyperparams['batch_size'])
         
+        # v2 IMPROVEMENT: Log temperature if available
+        if 'temperature' in output:
+            self.log(f"{task}_temperature", output['temperature'], prog_bar=False, on_step=True, on_epoch=True, logger=True,
+                     batch_size=self.hyperparams['batch_size'])
+        
         logs = ""
         logs += f"{task}_answer_accuracy: {output['answer_accuracy'].item():.4f}, "
         logs += f"{task}_loss_itc: {output['loss_itc'].item():.4f}, "
@@ -77,6 +96,10 @@ class QFormerBaseLightning(pl.LightningModule):
         logs += f"{task}_loss_itm: {output['loss_itm'].item():.4f}, "
         logs += f"{task}_loss_answer: {output['loss_answer'].item():.4f}, "
         logs += f"{task}_total_loss: {output['total_loss'].item():.4f}"
+        
+        # Log temperature if available
+        if 'temperature' in output:
+            logs += f", temp: {output['temperature'].item():.4f}"
         
         logger.info(logs)
 
@@ -155,20 +178,56 @@ class QFormerBaseLightning(pl.LightningModule):
         optimizer = AdamW(
             self.parameters(),
             lr=self.hyperparams['lr'],
-            betas=self.hyperparams['betas'],
+            betas=tuple(self.hyperparams['betas']),
             weight_decay=self.hyperparams['weight_decay'],
             eps=self.hyperparams['eps']
         )
         
-        # Add warm-up scheduler: linear warm-up for first 500 steps (reasonable for typical VQA datasets)
-        # With batch_size=48 and ~10k samples, 500 steps = ~2.4 epochs of warmup
-        def lr_lambda(current_step: int):
-            warmup_steps = self.hyperparams.get('warmup_steps', 500)  # Use config or default 500
-            if current_step < warmup_steps:
-                return float(current_step) / float(max(1, warmup_steps))
-            return 1.0
+        warmup_steps = self.hyperparams.get('warmup_steps', 200)
+        use_cosine_scheduler = self.hyperparams.get('use_cosine_scheduler', True)
+        min_lr_ratio = self.hyperparams.get('min_lr_ratio', 0.01)
         
-        scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+        # v2 IMPROVEMENT: Cosine annealing scheduler with warmup
+        if use_cosine_scheduler:
+            # Linear warmup
+            def warmup_lr_lambda(current_step: int):
+                if current_step < warmup_steps:
+                    return float(current_step) / float(max(1, warmup_steps))
+                return 1.0
+            
+            warmup_scheduler = LambdaLR(optimizer, lr_lambda=warmup_lr_lambda)
+            
+            # Cosine annealing after warmup
+            # Estimate total steps (will be adjusted during training)
+            num_epochs = self.hyperparams.get('num_epochs', 50)
+            # Approximate steps per epoch (will be updated by trainer)
+            estimated_steps_per_epoch = 100  # Conservative estimate
+            total_steps = num_epochs * estimated_steps_per_epoch
+            
+            # Cosine scheduler with minimum LR
+            cosine_scheduler = CosineAnnealingLR(
+                optimizer, 
+                T_max=max(total_steps - warmup_steps, 1),
+                eta_min=self.hyperparams['lr'] * min_lr_ratio
+            )
+            
+            # Combine warmup and cosine schedulers
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_steps]
+            )
+            
+            logger.info(f"Using cosine scheduler with warmup_steps={warmup_steps}, min_lr_ratio={min_lr_ratio}")
+        else:
+            # Fallback to warmup-only scheduler
+            def lr_lambda(current_step: int):
+                if current_step < warmup_steps:
+                    return float(current_step) / float(max(1, warmup_steps))
+                return 1.0
+            
+            scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+            logger.info(f"Using warmup-only scheduler with warmup_steps={warmup_steps}")
         
         return {
             "optimizer": optimizer,
