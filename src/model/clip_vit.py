@@ -1,20 +1,25 @@
 import torch
+import torch.nn as nn
 from PIL import Image
 import requests
 from transformers import CLIPProcessor, CLIPModel
 from loguru import logger
 
 
-class VisionEncoder:
+class VisionEncoder(nn.Module):  # FIX: Now inherits from nn.Module for proper parameter tracking
     def __init__(
             self,
             device: torch.device,
             model_name: str = "openai/clip-vit-large-patch14",
             unfreeze_layers: int = 0,
             only_use_processor: bool = False):
+        super().__init__()  # FIX: Call nn.Module.__init__()
+        
         if not only_use_processor:
             self.model = CLIPModel.from_pretrained(model_name).to(device)
             self._unfreeze_clip_layers(num_layers=unfreeze_layers)
+        else:
+            self.model = None
 
         self.processor = CLIPProcessor.from_pretrained(model_name)
         self.device = device

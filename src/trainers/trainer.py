@@ -277,8 +277,8 @@ def train(model_name: str,
         enable_checkpointing=True,
         # gradient_clip_val is configured in model's configure_gradient_clipping() method
         accumulate_grad_batches=1,
-        precision='16-mixed',  # Use mixed precision training for better stability
-        detect_anomaly=False  # Disable anomaly detection for performance (would catch NaN but slow)
+        precision='32',  # DEBUG: Use fp32 to rule out fp16 gradient issues
+        detect_anomaly=True  # DEBUG: Enable to catch gradient issues (remove for production)
     )
 
     trainer.fit(model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)

@@ -1,0 +1,35 @@
+{
+  "qformer_hidden_size": 768,
+  "blocks_num": 6,
+  "num_heads": 12,
+  "num_queries": 32,
+  "num_epochs": 50,
+  "batch_size": 64,
+  "lr": 1e-4,
+  "betas": [0.9, 0.999],
+  "dropout_rate": 0.1,
+  "weight_decay": 0.01,
+  "eps": 1e-8,
+  "sequence_size": 32,
+  "unfreeze_layers": 2,
+  "use_clip_for_text": true,
+  "gradient_clip_norm": 1.0,
+  "warmup_steps": 500,
+  "seed": 42,
+  
+  "comments": {
+    "qformer_hidden_size": "768 matches CLIP text dim for efficient projection",
+    "blocks_num": "6 layers - balanced depth for Q-Former",
+    "num_heads": "12 heads - MUST divide hidden_size evenly (768/12=64)",
+    "num_queries": "32 queries - standard for VQA tasks",
+    "batch_size": "64 - H100 can handle larger batches, improves ITC contrastive learning",
+    "lr": "1e-4 - higher LR since we fixed warmup, AdamW can handle this",
+    "betas": "[0.9, 0.999] - standard AdamW betas, more stable than [0.9, 0.98]",
+    "dropout_rate": "0.1 - lower since model was underfitting, not overfitting",
+    "weight_decay": "0.01 - lighter regularization since underfitting",
+    "sequence_size": "32 - longer context for questions",
+    "unfreeze_layers": "2 - fine-tune top 2 layers of CLIP for domain adaptation",
+    "warmup_steps": "500 - ~2-3 epochs warmup with batch_size=64"
+  }
+}
+

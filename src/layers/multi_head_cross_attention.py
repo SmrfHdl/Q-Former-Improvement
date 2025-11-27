@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 
 class MultiHeadCrossAttentionLayer(nn.Module):
-    def __init__(self, dim: int, num_heads: int):
+    def __init__(self, dim: int, num_heads: int, dropout: float = 0.1):
         super().__init__()
 
         assert dim % num_heads == 0, f"dim {dim} must be divisible by num_heads {num_heads}"
@@ -19,16 +19,17 @@ class MultiHeadCrossAttentionLayer(nn.Module):
 
         self.out_proj = nn.Linear(dim, dim)
 
-        self.layer_norm = nn.LayerNorm(dim)
+        # NOTE: LayerNorm removed - it's applied in CrossModalTransformerLayer
 
-        self.attn_dropout = nn.Dropout(0.3)
-        self.proj_dropout = nn.Dropout(0.3)
+        self.attn_dropout = nn.Dropout(dropout)  # FIX: Use configurable dropout
+        self.proj_dropout = nn.Dropout(dropout)  # FIX: Use configurable dropout
 
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor = None):
         batch_size, query_len, _ = query.shape
         _, key_value_len, _ = key.shape
 
-        query = self.layer_norm(query)
+        # NOTE: LayerNorm is already applied in CrossModalTransformerLayer before calling this
+        # Removed duplicate layer_norm here to prevent gradient vanishing
 
         query = self.linear_q(query)
         key = self.linear_k(key)
@@ -44,7 +45,8 @@ class MultiHeadCrossAttentionLayer(nn.Module):
         if attention_mask is not None:
             attention_mask = attention_mask.unsqueeze(1)
             attention_mask = attention_mask.expand(-1, self.num_heads, -1, -1)
-            scores = scores.masked_fill(attention_mask == 1, float('-inf'))
+            # Use large finite negative value instead of -inf to avoid NaN in softmax backward
+            scores = scores.masked_fill(attention_mask == 1, -1e9)
 
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.attn_dropout(attn_weights)

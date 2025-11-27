@@ -112,9 +112,10 @@ class QFormerImprovedLightning(pl.LightningModule):
             eps=self.hyperparams['eps']
         )
         
-        # Add warm-up scheduler: linear warm-up for first 5000 steps
+        # Add warm-up scheduler: linear warm-up for first 500 steps (reasonable for typical VQA datasets)
+        # With batch_size=48 and ~10k samples, 500 steps = ~2.4 epochs of warmup
         def lr_lambda(current_step: int):
-            warmup_steps = 5000
+            warmup_steps = self.hyperparams.get('warmup_steps', 500)  # Use config or default 500
             if current_step < warmup_steps:
                 return float(current_step) / float(max(1, warmup_steps))
             return 1.0

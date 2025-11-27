@@ -20,7 +20,7 @@ class CrossModalTransformerLayer(nn.Module):
         
         self.norm_q_cross = nn.LayerNorm(dim)
         self.norm_kv_cross = nn.LayerNorm(dim)
-        self.mhca = MultiHeadCrossAttentionLayer(dim, num_heads)
+        self.mhca = MultiHeadCrossAttentionLayer(dim, num_heads, dropout=dropout)  # FIX: Pass dropout
         self.dropout_cross = nn.Dropout(dropout)
 
         self.norm_self = nn.LayerNorm(dim)
@@ -28,7 +28,7 @@ class CrossModalTransformerLayer(nn.Module):
         self.dropout_self = nn.Dropout(dropout)
 
         self.norm_ff = nn.LayerNorm(dim)
-        self.ff = FeedForwardLayer(dim, ffn_expansion_factor, dropout)
+        self.ff = FeedForwardLayer(dim, dim * ffn_expansion_factor, dropout)  # FIX: multiply by dim
         self.dropout_ff = nn.Dropout(dropout)
 
     def forward(self, queries: torch.Tensor, image_features: torch.Tensor, text_embeddings: torch.Tensor, attention_mask: torch.Tensor = None):

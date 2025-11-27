@@ -3,7 +3,7 @@
   "blocks_num": 6,
   "num_heads": 12,
   "num_queries": 32,
-  "num_epochs": 30,
+  "num_epochs": 50,
   "batch_size": 48,
   "lr": 5e-4,
   "betas": [0.9, 0.999],
@@ -15,5 +15,7 @@
   "use_clip_for_text": true,
   "gradient_clip_norm": 1.0,
   "warmup_steps": 100,
-  "patience": 10
+  "patience": 10,
+  "seed": 42
 }
+

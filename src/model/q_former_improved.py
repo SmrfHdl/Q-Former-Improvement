@@ -431,13 +431,12 @@ class QFormerImproved(nn.Module):
         logger.info(f"Unfroze {unfreeze_layers} BERT layers. Trainable params: {trainable_params}")
 
     def init_weights(self):
-        # Initialize projection layers
-        nn.init.kaiming_normal_(self.vision_projection.weight, mode='fan_in', nonlinearity='linear')
-        self.vision_projection.weight.data *= 0.001
+        # Use Xavier uniform initialization for projection layers (standard for linear projections)
+        # No aggressive scaling - let LayerNorm handle normalization
+        nn.init.xavier_uniform_(self.vision_projection.weight)
         nn.init.zeros_(self.vision_projection.bias)
 
-        nn.init.kaiming_normal_(self.text_projection.weight, mode='fan_in', nonlinearity='linear')
-        self.text_projection.weight.data *= 0.001
+        nn.init.xavier_uniform_(self.text_projection.weight)
         nn.init.zeros_(self.text_projection.bias)
 
     def encode_text(self, questions: list[str] | str):
@@ -475,6 +474,8 @@ class QFormerImproved(nn.Module):
         """Generate attention mask based on task type."""
         batch_size, text_len = pad_mask.size()
         total_len = query_len + text_len 
+        # Use a large finite negative value instead of -inf to avoid NaN in softmax backward
+        MASK_VALUE = -1e9
         task_mask = torch.zeros((batch_size, total_len, total_len), device=device)
 
         if task == 'itm':
@@ -482,18 +483,18 @@ class QFormerImproved(nn.Module):
         elif task == "igt":
             causal_indices = torch.triu_indices(text_len, text_len, offset=1, device=device)
             for b in range(batch_size):
-                task_mask[b, query_len + causal_indices[0], query_len + causal_indices[1]] = float('-inf')
-            task_mask[:, :query_len, query_len:] = float('-inf')
+                task_mask[b, query_len + causal_indices[0], query_len + causal_indices[1]] = MASK_VALUE
+            task_mask[:, :query_len, query_len:] = MASK_VALUE
         elif task == 'itc':
-            task_mask[:, :query_len, query_len:] = float('-inf')
-            task_mask[:, query_len:, :query_len] = float('-inf')
+            task_mask[:, :query_len, query_len:] = MASK_VALUE
+            task_mask[:, query_len:, :query_len] = MASK_VALUE
 
         padding_positions = (pad_mask == 0)
         for b in range(batch_size):
             if padding_positions[b].any():
                 pad_indices = torch.nonzero(padding_positions[b], as_tuple=True)[0]
-                task_mask[b, :, query_len + pad_indices] = float('-inf')
-                task_mask[b, query_len + pad_indices, :] = float('-inf')
+                task_mask[b, :, query_len + pad_indices] = MASK_VALUE
+                task_mask[b, query_len + pad_indices, :] = MASK_VALUE
 
         return task_mask
     
@@ -572,7 +573,10 @@ class QFormerImproved(nn.Module):
         )
 
         # === Image-Text Contrastive (ITC) Loss ===
+        # Project text to same space as Q-Former features
         cls_text_embedding = question_output['last_hidden_state'][:, 0, :]
+        cls_text_embedding = self.text_projection(cls_text_embedding)  # FIX: Project to Q-Former space
+        cls_text_embedding = self.text_norm(cls_text_embedding)
         cls_text_embedding = F.normalize(cls_text_embedding, p=2, dim=-1, eps=1e-6)
         
         global_image_embedding = global_features.mean(dim=1)

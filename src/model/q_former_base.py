@@ -132,14 +132,12 @@ class QFormerBase(nn.Module):
         self.text_dim = self.bert.config.hidden_size
 
     def init_weights(self):
-        # Use He initialization for projection layers (better for ReLU-like activations)
-        # Scale down by 0.001 for maximum stability with normalization
-        nn.init.kaiming_normal_(self.vision_projection.weight, mode='fan_in', nonlinearity='linear')
-        self.vision_projection.weight.data *= 0.001
+        # Use Xavier uniform initialization for projection layers (standard for linear projections)
+        # No aggressive scaling - let LayerNorm handle normalization
+        nn.init.xavier_uniform_(self.vision_projection.weight)
         nn.init.zeros_(self.vision_projection.bias)
 
-        nn.init.kaiming_normal_(self.text_projection.weight, mode='fan_in', nonlinearity='linear')
-        self.text_projection.weight.data *= 0.001
+        nn.init.xavier_uniform_(self.text_projection.weight)
         nn.init.zeros_(self.text_projection.bias)
 
         nn.init.normal_(self.learned_queries, std=0.02)
@@ -239,11 +237,15 @@ class QFormerBase(nn.Module):
             device (torch.device): Device to place the tensors on.
 
         Returns:
-            Attention mask (torch.Tensor): 0 means "can attend", -inf means "cannot attend".
+            Attention mask (torch.Tensor): 0 means "can attend", large negative value means "cannot attend".
                 Shape: batch_size, total_len, total_len
         """
         batch_size, text_len = pad_mask.size()
         total_len = query_len + text_len 
+
+        # Use a large finite negative value instead of -inf to avoid NaN in softmax backward
+        # -inf causes NaN when entire rows are masked: softmax([-inf, -inf, ...]) = 0/0 = NaN
+        MASK_VALUE = -1e9
 
         task_mask = torch.zeros((batch_size, total_len, total_len), device=device)
 
@@ -254,13 +256,13 @@ class QFormerBase(nn.Module):
             causal_indices = torch.triu_indices(text_len, text_len, offset=1, device=device)
 
             for b in range(batch_size):
-                task_mask[b, query_len + causal_indices[0], query_len + causal_indices[1]] = float('-inf')
+                task_mask[b, query_len + causal_indices[0], query_len + causal_indices[1]] = MASK_VALUE
 
-            task_mask[:, :query_len, query_len:] = float('-inf')
+            task_mask[:, :query_len, query_len:] = MASK_VALUE
 
         elif task == 'itc':
-            task_mask[:, :query_len, query_len:] = float('-inf')
-            task_mask[:, query_len:, :query_len] = float('-inf')
+            task_mask[:, :query_len, query_len:] = MASK_VALUE
+            task_mask[:, query_len:, :query_len] = MASK_VALUE
 
         padding_postitions = (pad_mask == 0)
 
@@ -268,9 +270,9 @@ class QFormerBase(nn.Module):
             if padding_postitions[b].any():
                 pad_indices = torch.nonzero(padding_postitions[b], as_tuple=True)[0]
 
-                task_mask[b, :, query_len + pad_indices] = float('-inf')
+                task_mask[b, :, query_len + pad_indices] = MASK_VALUE
 
-                task_mask[b, query_len + pad_indices, :] = float('-inf')
+                task_mask[b, query_len + pad_indices, :] = MASK_VALUE
 
         return task_mask
     
@@ -316,8 +318,8 @@ class QFormerBase(nn.Module):
             device=self.device
         ) # (batch_size, num_queries + text_len, num_queries + text_len)
         queries, _ = self.cross_modal_transformer(
-            image_features,
-            queries,
+            queries,           # FIX: queries first (as Q in cross-attention)
+            image_features,    # FIX: image_features second (as K,V in cross-attention)
             text_embeddings=question_output['last_hidden_state'],
             attention_mask=attention_mask
         )
@@ -441,8 +443,8 @@ class QFormerBase(nn.Module):
         queries_itm = self.learned_queries.expand(image_embeddings_all.shape[0], -1, -1).clone()
 
         queries_itm, _ = self.cross_modal_transformer(
-            image_embeddings_all,
-            queries_itm,
+            queries_itm,            # FIX: queries first
+            image_embeddings_all,   # FIX: image second
             text_embeddings=text_embeddings_all,
             attention_mask=attention_mask_all
         )
@@ -452,9 +454,9 @@ class QFormerBase(nn.Module):
         logits = torch.mean(itm_embeddings, dim=1) # (batch_size * 3, 2)
 
         itm_labels = torch.cat([
-            torch.ones(batch_size, dtype=torch.long),
-            torch.zeros(batch_size, dtype=torch.long),
-            torch.ones(batch_size, dtype=torch.long)
+            torch.ones(batch_size, dtype=torch.long),   # Positive: (image, text)
+            torch.zeros(batch_size, dtype=torch.long),  # Negative: (wrong_image, text)
+            torch.zeros(batch_size, dtype=torch.long)   # FIX: Negative: (image, wrong_text)
         ], dim=0).to(self.device)
 
         loss_itm = F.cross_entropy(logits, itm_labels)
@@ -488,8 +490,8 @@ class QFormerBase(nn.Module):
         queries_igt = self.learned_queries.expand(batch_size, -1, -1).clone()
 
         queries_igt, text_embeddings_igt = self.cross_modal_transformer(
-            image_features,
-            queries_igt,
+            queries_igt,     # FIX: queries first
+            image_features,  # FIX: image second
             text_embeddings=igt_text_output['last_hidden_state'],
             attention_mask=igt_attention_mask
         )
