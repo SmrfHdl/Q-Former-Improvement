@@ -137,9 +137,10 @@ class QFormerBaseLightning(pl.LightningModule):
             else:
                 grad_info.append("vision_proj_grad: None!")
                 
-            # Check answer_head gradient
-            if self.q_former_base.answer_head.weight.grad is not None:
-                a_grad = self.q_former_base.answer_head.weight.grad
+            # Check answer_head gradient (last linear layer in Sequential)
+            answer_head_last_linear = self.q_former_base.answer_head[-1]  # Last layer is Linear
+            if answer_head_last_linear.weight.grad is not None:
+                a_grad = answer_head_last_linear.weight.grad
                 grad_info.append(f"answer_head_grad: mean={a_grad.mean().item():.6f}, max={a_grad.abs().max().item():.6f}")
             else:
                 grad_info.append("answer_head_grad: None!")

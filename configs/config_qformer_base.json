@@ -5,8 +5,8 @@
   "num_queries": 32,
   "num_epochs": 50,
   "batch_size": 48,
-  "lr": 5e-4,
-  "betas": [0.9, 0.999],
+  "lr": 1e-4,
+  "betas": [0.9, 0.98],
   "dropout_rate": 0.1,
   "weight_decay": 0.01,
   "eps": 1e-8,
@@ -16,6 +16,23 @@
   "gradient_clip_norm": 1.0,
   "warmup_steps": 100,
   "patience": 10,
-  "seed": 42
+  "seed": 42,
+  
+  "learnable_temperature": true,
+  "initial_temperature": 0.07,
+  "temperature_min": 0.01,
+  "temperature_max": 0.5,
+    
+  "label_smoothing_answer": 0.1,
+  "label_smoothing_itc": 0.1,
+  "label_smoothing_itm": 0.1,
+    
+  "loss_weight_itc": 1.0,
+  "loss_weight_itm": 1.0,
+  "loss_weight_igt": 1.0,
+  "loss_weight_answer": 1.0,
+    
+  "use_cosine_scheduler": true,
+  "min_lr_ratio": 0.01,
+  "stochastic_depth_rate": 0.0
 }
-

@@ -192,14 +192,22 @@ class QFormerBase(nn.Module):
 
         nn.init.normal_(self.learned_queries, std=0.02)
 
-        nn.init.normal_(self.itm_head.weight, std=0.02)
-        nn.init.zeros_(self.itm_head.bias)
+        # Initialize itm_head (Sequential)
+        for layer in self.itm_head:
+            if isinstance(layer, nn.Linear):
+                nn.init.normal_(layer.weight, std=0.02)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
 
         nn.init.normal_(self.lm_head.weight, std=0.02)
         nn.init.zeros_(self.lm_head.bias)
 
-        nn.init.normal_(self.answer_head.weight, std=0.02)
-        nn.init.zeros_(self.answer_head.bias)
+        # Initialize answer_head (Sequential)
+        for layer in self.answer_head:
+            if isinstance(layer, nn.Linear):
+                nn.init.normal_(layer.weight, std=0.02)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
 
         for layer in self.cat_mlp:
             if isinstance(layer, nn.Linear):
@@ -342,24 +350,25 @@ class QFormerBase(nn.Module):
         if torch.isnan(image_features).any() or torch.isinf(image_features).any():
             logger.warning(f"WARNING: NaN/Inf detected in image_features after projection")
             logger.warning(f"Vision projection weight stats: min={self.vision_projection.weight.min().item():.4f}, max={self.vision_projection.weight.max().item():.4f}")
-        # L2 normalize (keep gradient flow, no detach)
-        image_features = F.normalize(image_features, p=2, dim=-1, eps=1e-6)
+        # NOTE: Removed L2 normalization here - it was hurting gradient flow through cross-attention
+        # LayerNorm already provides sufficient normalization
 
         queries = self.learned_queries.expand(image_features.shape[0], -1, -1).clone() # (batch_size, num_queries = 32, hidden_dim = 768)
 
         question_output, question_tokens = self.encode_text(question)
+        
+        # FIX: Project ALL text embeddings to same space as image_features
+        # This ensures both modalities are in the same representation space for the transformer
+        text_embeddings_raw = question_output['last_hidden_state']  # (batch_size, seq_len, text_dim)
+        text_embeddings_projected = self.text_projection(text_embeddings_raw)  # Project all tokens
+        text_embeddings_projected = self.text_norm(text_embeddings_projected)
+        text_embeddings_projected = self.text_dropout(text_embeddings_projected)
 
-        # Image Text Contrastive
-        cls_text_embedding = question_output['last_hidden_state'][:, 0, :] # (batch_size, hidden_dim)
-        cls_text_embedding = self.text_projection(cls_text_embedding)
-        cls_text_embedding = self.text_norm(cls_text_embedding)
-        cls_text_embedding = self.text_dropout(cls_text_embedding)
-        # Check for NaN/Inf after text projection
-        if torch.isnan(cls_text_embedding).any() or torch.isinf(cls_text_embedding).any():
-            logger.warning(f"WARNING: NaN/Inf detected in cls_text_embedding after projection")
-            logger.warning(f"Text projection weight stats: min={self.text_projection.weight.min().item():.4f}, max={self.text_projection.weight.max().item():.4f}")
-        # L2 normalize (keep gradient flow, no detach)
-        cls_text_embedding = F.normalize(cls_text_embedding, p=2, dim=-1, eps=1e-6)
+        # Image Text Contrastive - use CLS token (index 0)
+        cls_text_embedding = text_embeddings_projected[:, 0, :]  # (batch_size, hidden_dim)
+        
+        # L2 normalize for ITC similarity computation
+        cls_text_embedding_normalized = F.normalize(cls_text_embedding, p=2, dim=-1, eps=1e-6)
 
         attention_mask = self.generate_attention_mask(
             task='itc',
@@ -367,10 +376,12 @@ class QFormerBase(nn.Module):
             pad_mask=question_tokens['attention_mask'],
             device=self.device
         ) # (batch_size, num_queries + text_len, num_queries + text_len)
+        
+        # FIX: Pass PROJECTED text_embeddings to transformer (same space as image)
         queries, _ = self.cross_modal_transformer(
-            queries,           # FIX: queries first (as Q in cross-attention)
-            image_features,    # FIX: image_features second (as K,V in cross-attention)
-            text_embeddings=question_output['last_hidden_state'],
+            queries,           # queries as Q in cross-attention
+            image_features,    # image_features as K,V in cross-attention  
+            text_embeddings=text_embeddings_projected,  # PROJECTED text for self-attention
             attention_mask=attention_mask
         )
 
@@ -379,13 +390,16 @@ class QFormerBase(nn.Module):
             logger.warning(f"WARNING: NaN/Inf detected in queries after cross_modal_transformer")
             logger.warning(f"queries stats: min={queries.min().item():.4f}, max={queries.max().item():.4f}, mean={queries.mean().item():.4f}")
 
-        # L2 normalize (keep gradient flow, no detach)
-        queries = F.normalize(queries, p=2, dim=-1, eps=1e-6)
+        # Keep un-normalized queries for answer prediction (better gradient flow)
+        queries_for_answer = queries
+        
+        # L2 normalize ONLY for ITC similarity computation
+        queries_normalized = F.normalize(queries, p=2, dim=-1, eps=1e-6)
 
-        # Image to Text similarity calculation
-        # queries: (batch_size, num_queries, dim), cls_text_embedding: (batch_size, dim)
+        # Image to Text similarity calculation (use normalized queries and text)
+        # queries_normalized: (batch_size, num_queries, dim), cls_text_embedding_normalized: (batch_size, dim)
         # We want: (batch_size, batch_size, num_queries)
-        sim_i2t = torch.einsum("bqd, Bd -> bBq", queries, cls_text_embedding)
+        sim_i2t = torch.einsum("bqd, Bd -> bBq", queries_normalized, cls_text_embedding_normalized)
 
         sim_i2t, _ = sim_i2t.max(-1) # Max over queries: (b, B) where b=query batch, B=text batch
         
@@ -461,7 +475,8 @@ class QFormerBase(nn.Module):
             except RuntimeError:
                 # If multinomial fails, use argmax as fallback
                 negative_idx = torch.argmax(weights_i2t[b]).item()
-            text_embeddings_negative.append(question_output['last_hidden_state'][negative_idx])
+            # FIX: Use projected text embeddings for consistency
+            text_embeddings_negative.append(text_embeddings_projected[negative_idx])
             attention_masks_negative.append(question_tokens['attention_mask'][negative_idx])
 
         text_embeddings_negative = torch.stack(text_embeddings_negative, dim=0) # (batch_size, max_len, hidden_dim)
@@ -473,8 +488,9 @@ class QFormerBase(nn.Module):
             device=self.device
         )
 
+        # FIX: Use projected text embeddings for consistency
         text_embeddings_all = torch.cat([
-            question_output['last_hidden_state'], question_output['last_hidden_state'], text_embeddings_negative], dim=0)
+            text_embeddings_projected, text_embeddings_projected, text_embeddings_negative], dim=0)
         
         image_embeddings_all = torch.cat([
             image_features, image_embeddings_negative, image_features], dim=0)
@@ -536,6 +552,11 @@ class QFormerBase(nn.Module):
                 return_dict=True
             )
         
+        # FIX: Project IGT text embeddings to same space as image
+        igt_text_projected = self.text_projection(igt_text_output['last_hidden_state'])
+        igt_text_projected = self.text_norm(igt_text_projected)
+        igt_text_projected = self.text_dropout(igt_text_projected)
+        
         igt_attention_mask = self.generate_attention_mask(
             task='igt',
             query_len=queries.shape[1],
@@ -546,9 +567,9 @@ class QFormerBase(nn.Module):
         queries_igt = self.learned_queries.expand(batch_size, -1, -1).clone()
 
         queries_igt, text_embeddings_igt = self.cross_modal_transformer(
-            queries_igt,     # FIX: queries first
-            image_features,  # FIX: image second
-            text_embeddings=igt_text_output['last_hidden_state'],
+            queries_igt,     # queries first
+            image_features,  # image second
+            text_embeddings=igt_text_projected,  # FIX: Use projected text
             attention_mask=igt_attention_mask
         )
 
@@ -567,12 +588,14 @@ class QFormerBase(nn.Module):
             reduction='mean'
         )
 
-        # Answer Prediction
-        # Use queries from ITC (not ITM) for answer prediction
-        # queries shape: (batch_size, num_queries, dim)
-
-        max_pooled_queries = torch.max(queries, dim=1)[0]
-
+        # Answer Prediction - Use queries from cross_modal_transformer
+        # The queries have attended to both image and text, capturing multimodal info
+        # queries_for_answer shape: (batch_size, num_queries, dim)
+        
+        # Max pool over queries to get the most relevant query representation
+        max_pooled_queries = torch.max(queries_for_answer, dim=1)[0]  # (batch_size, dim)
+        
+        # Use answer_head for prediction
         answer_logits = self.answer_head(max_pooled_queries)
 
         answers = samples['answer']

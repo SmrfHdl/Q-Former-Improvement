@@ -218,13 +218,15 @@ def train(model_name: str,
                 val_loss_igt_val = val_loss_igt.item() if hasattr(val_loss_igt, 'item') else float(val_loss_igt)
                 val_loss_itm_val = val_loss_itm.item() if hasattr(val_loss_itm, 'item') else float(val_loss_itm)
 
-                # Use total_loss or sum of components if available
-                train_loss = trainer.callback_metrics.get("train_loss_epoch",
+                # Use total_loss (weighted) - model logs as train_total_loss
+                train_loss = trainer.callback_metrics.get("train_total_loss_epoch",
+                                                            trainer.callback_metrics.get("train_loss_epoch",
                                                             sum([train_loss_itc_val, train_loss_igt_val,
-                                                                train_loss_itm_val, train_loss_answer_val]))
-                val_loss = trainer.callback_metrics.get("val_loss_epoch",
+                                                                train_loss_itm_val, train_loss_answer_val])))
+                val_loss = trainer.callback_metrics.get("val_total_loss_epoch",
+                                                        trainer.callback_metrics.get("val_loss_epoch",
                                                         sum([val_loss_itc_val, val_loss_igt_val, val_loss_itm_val,
-                                                                val_loss_answer_val]))
+                                                                val_loss_answer_val])))
 
                 train_loss_val = train_loss.item() if hasattr(train_loss, 'item') else float(train_loss)
                 val_loss_val = val_loss.item() if hasattr(val_loss, 'item') else float(val_loss)
