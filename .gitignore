@@ -15,10 +15,12 @@ bla.py
 bla.ipynb
 utils/
 
-results/
+results/wandb
+results/plots
+results/*.ckpt
+results/all_runs_summary.csv
 logs/
 
-*.csv
 *.zip
 
 .github/
