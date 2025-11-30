@@ -154,7 +154,9 @@ def create_dataloader(
         batch_size: int = 32,
         device: torch.device = torch.device("cpu"),
         use_augmentation: bool = False,
-        augmentation_prob: float = 0.5
+        augmentation_prob: float = 0.5,
+        num_workers: int = 0,
+        pin_memory: bool = False
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """
     Create DataLoaders for training, validation, and testing datasets.
@@ -204,25 +206,39 @@ def create_dataloader(
     logger.info(f"Validation samples: {len(val_dataset)}")
     logger.info(f"Test samples: {len(test_dataset)}")
 
+    # H100 optimization: use multiple workers and pin_memory for faster data loading
+    dataloader_kwargs = {
+        'num_workers': num_workers,
+        'pin_memory': pin_memory,
+        'persistent_workers': num_workers > 0,  # Keep workers alive between epochs
+        'prefetch_factor': 2 if num_workers > 0 else None,  # Prefetch batches
+    }
+    
+    if num_workers > 0:
+        logger.info(f"Using {num_workers} data loading workers with pin_memory={pin_memory}")
+
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=train_dataset.collate_fn
+        collate_fn=train_dataset.collate_fn,
+        **dataloader_kwargs
     )
 
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=val_dataset.collate_fn
+        collate_fn=val_dataset.collate_fn,
+        **dataloader_kwargs
     )
 
     test_dataloader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=test_dataset.collate_fn
+        collate_fn=test_dataset.collate_fn,
+        **dataloader_kwargs
     )
 
     return train_dataloader, val_dataloader, test_dataloader

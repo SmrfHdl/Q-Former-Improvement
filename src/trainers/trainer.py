@@ -140,6 +140,7 @@ def train(model_name: str,
         raise FileNotFoundError(f"Images directory not found: {images_dir}")
     
     # v2 IMPROVEMENT: Pass augmentation parameters
+    # H100 optimization: use multiple workers for data loading
     train_dataloader, val_dataloader, test_dataloader = create_dataloader(
         train_file=train_file,
         val_file=val_file,
@@ -148,7 +149,9 @@ def train(model_name: str,
         batch_size=hyperparams['batch_size'],
         device=device,
         use_augmentation=hyperparams.get('use_data_augmentation', False),
-        augmentation_prob=hyperparams.get('augmentation_prob', 0.5)
+        augmentation_prob=hyperparams.get('augmentation_prob', 0.5),
+        num_workers=hyperparams.get('num_workers', 0),
+        pin_memory=hyperparams.get('pin_memory', False)
     )
 
     if model_name.lower() == "qformer_base":
@@ -270,6 +273,15 @@ def train(model_name: str,
     if wandb_logger is not None:
         loggers.append(wandb_logger)
 
+    # H100 optimizations: enable TF32 for faster matmul
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision('high')
+    
+    # Get precision from config (default to bf16-mixed for H100)
+    precision = hyperparams.get('precision', 'bf16-mixed')
+    
     trainer = pl.Trainer(
         max_epochs=hyperparams.get('num_epochs', 100),
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
@@ -282,8 +294,7 @@ def train(model_name: str,
         enable_checkpointing=True,
         # gradient_clip_val is configured in model's configure_gradient_clipping() method
         accumulate_grad_batches=1,
-        precision='32',  # DEBUG: Use fp32 to rule out fp16 gradient issues
-        detect_anomaly=True  # DEBUG: Enable to catch gradient issues (remove for production)
+        precision=precision,  # bf16-mixed for H100 optimization
     )
 
     trainer.fit(model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)

@@ -4,17 +4,17 @@
   "num_heads": 12,
   "num_queries": 32,
   "num_epochs": 50,
-  "batch_size": 48,
-  "lr": 1e-4,
+  "batch_size": 192,
+  "lr": 4e-4,
   "betas": [0.9, 0.98],
-  "dropout_rate": 0.1,
-  "weight_decay": 0.01,
+  "dropout_rate": 0.2,
+  "weight_decay": 0.05,
   "eps": 1e-8,
   "sequence_size": 32,
   "unfreeze_layers": 0,
   "use_clip_for_text": true,
   "gradient_clip_norm": 1.0,
-  "warmup_steps": 100,
+  "warmup_steps": 200,
   "patience": 10,
   "seed": 42,
   
@@ -27,12 +27,16 @@
   "label_smoothing_itc": 0.1,
   "label_smoothing_itm": 0.1,
     
-  "loss_weight_itc": 1.0,
-  "loss_weight_itm": 1.0,
-  "loss_weight_igt": 1.0,
-  "loss_weight_answer": 1.0,
+  "loss_weight_itc": 0.3,
+  "loss_weight_itm": 0.5,
+  "loss_weight_igt": 0.0,
+  "loss_weight_answer": 1.5,
     
   "use_cosine_scheduler": true,
   "min_lr_ratio": 0.01,
-  "stochastic_depth_rate": 0.0
+  "stochastic_depth_rate": 0.1,
+
+  "num_workers": 8,
+  "pin_memory": true,
+  "precision": "bf16-mixed"
 }
