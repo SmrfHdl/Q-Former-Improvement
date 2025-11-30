@@ -37,8 +37,8 @@ class VisionEncoder(nn.Module):  # FIX: Now inherits from nn.Module for proper p
         images = [Image.open(path).convert("RGB") for path in image_paths]
 
         image_inputs = self.processor(images=images, return_tensors="pt")
-        image_inputs = image_inputs.to(self.device)
-
+        # Don't move to device here - let DataLoader workers return CPU tensors
+        # GPU transfer happens in collate_fn or training loop
         return image_inputs
     
     def encode(self, image_input) -> torch.Tensor:

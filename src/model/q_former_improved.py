@@ -574,7 +574,14 @@ class QFormerImproved(nn.Module):
 
         # === Image-Text Contrastive (ITC) Loss ===
         # Project text to same space as Q-Former features
-        cls_text_embedding = question_output['last_hidden_state'][:, 0, :]
+        # FIX: Use EOS token position for CLIP (not position 0!)
+        if self.use_clip_for_text:
+            eos_token_id = 49407
+            eos_positions = (question_tokens['input_ids'] == eos_token_id).int().argmax(dim=-1)
+            batch_indices = torch.arange(batch_size, device=self.device)
+            cls_text_embedding = question_output['last_hidden_state'][batch_indices, eos_positions, :]
+        else:
+            cls_text_embedding = question_output['last_hidden_state'][:, 0, :]
         cls_text_embedding = self.text_projection(cls_text_embedding)  # FIX: Project to Q-Former space
         cls_text_embedding = self.text_norm(cls_text_embedding)
         cls_text_embedding = F.normalize(cls_text_embedding, p=2, dim=-1, eps=1e-6)

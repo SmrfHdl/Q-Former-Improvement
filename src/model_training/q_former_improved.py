@@ -29,6 +29,17 @@ class QFormerImprovedLightning(pl.LightningModule):
             device=device
         )
 
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        """Transfer nested dict batch to device - handles image_input dict."""
+        if isinstance(batch, dict):
+            for key, value in batch.items():
+                if isinstance(value, dict):
+                    batch[key] = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                                  for k, v in value.items()}
+                elif isinstance(value, torch.Tensor):
+                    batch[key] = value.to(device)
+        return batch
+
     def forward(self, samples: dict):
         return self.q_former_improved(samples)
     

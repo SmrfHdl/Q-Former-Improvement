@@ -47,15 +47,18 @@ class VQADataset(Dataset):
             only_use_processor=True
         )
         
-        # v2 IMPROVEMENT: Data augmentation for training
+        # v2 IMPROVEMENT: Strong data augmentation for training to reduce overfitting
         if use_augmentation:
             self.augment_transform = transforms.Compose([
                 transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomRotation(degrees=10),
-                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+                transforms.RandomRotation(degrees=15),
+                transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.15),
+                transforms.RandomAffine(degrees=0, translate=(0.15, 0.15), scale=(0.85, 1.15)),
+                transforms.RandomGrayscale(p=0.1),
+                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+                transforms.RandomPerspective(distortion_scale=0.2, p=0.3),
             ])
-            logger.info(f"Data augmentation enabled with prob={augmentation_prob}")
+            logger.info(f"Strong data augmentation enabled with prob={augmentation_prob}")
         else:
             self.augment_transform = None
 
@@ -115,9 +118,8 @@ class VQADataset(Dataset):
                 # Load image, apply augmentation, then process
                 pil_image = Image.open(sample["image_path"]).convert("RGB")
                 pil_image = self.augment_transform(pil_image)
-                # Process augmented image
+                # Process augmented image (keep on CPU, GPU transfer in collate_fn)
                 image = self.vision_encoder.processor(images=pil_image, return_tensors="pt")
-                image = image.to(self.device)
             else:
                 image = self.vision_encoder.path_to_tensor(sample["image_path"])
         else:
@@ -135,8 +137,9 @@ class VQADataset(Dataset):
     def collate_fn(self, batch: list[dict]) -> dict:
         batch_dict = {}
 
-        images = torch.stack([item["image"] for item in batch]).to(self.device)
-        image_input = {"pixel_values": images.to(self.device)}
+        # Keep on CPU - PyTorch Lightning will move to GPU automatically
+        images = torch.stack([item["image"] for item in batch])
+        image_input = {"pixel_values": images}
         batch_dict["image_input"] = image_input
 
         batch_dict["question"] = [item["question"] for item in batch]

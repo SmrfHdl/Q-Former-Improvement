@@ -115,12 +115,13 @@ class QFormerBase(nn.Module):
 
         self.lm_head = nn.Linear(qformer_hidden_size, self.tokenizer.vocab_size)
 
-        # Improved answer head with more capacity and dropout
+        # Answer head with strong regularization to prevent overfitting
         self.answer_head = nn.Sequential(
-            nn.Linear(qformer_hidden_size, qformer_hidden_size // 2),
+            nn.Dropout(0.5),  # Heavy dropout BEFORE first layer
+            nn.Linear(qformer_hidden_size, qformer_hidden_size // 4),  # Smaller capacity
             nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(qformer_hidden_size // 2, 1)
+            nn.Dropout(0.5),  # Heavy dropout
+            nn.Linear(qformer_hidden_size // 4, 1)
         )
 
         self.cat_mlp = nn.Sequential(
@@ -364,8 +365,20 @@ class QFormerBase(nn.Module):
         text_embeddings_projected = self.text_norm(text_embeddings_projected)
         text_embeddings_projected = self.text_dropout(text_embeddings_projected)
 
-        # Image Text Contrastive - use CLS token (index 0)
-        cls_text_embedding = text_embeddings_projected[:, 0, :]  # (batch_size, hidden_dim)
+        # Image Text Contrastive - use EOS token position (CLIP uses EOS, not position 0!)
+        # For CLIP: EOS token is at the position of the last non-padding token
+        # We find it using argmax on input_ids to locate EOS token (id=49407 for CLIP)
+        if self.use_clip_for_text:
+            # CLIP EOS token id is 49407, find its position in each sequence
+            eos_token_id = 49407
+            # Find position of EOS token (first occurrence of EOS in each sequence)
+            eos_positions = (question_tokens['input_ids'] == eos_token_id).int().argmax(dim=-1)
+            # Gather the embedding at EOS position for each batch item
+            batch_indices = torch.arange(text_embeddings_projected.size(0), device=self.device)
+            cls_text_embedding = text_embeddings_projected[batch_indices, eos_positions, :]
+        else:
+            # For BERT, use CLS token at position 0
+            cls_text_embedding = text_embeddings_projected[:, 0, :]  # (batch_size, hidden_dim)
         
         # L2 normalize for ITC similarity computation
         cls_text_embedding_normalized = F.normalize(cls_text_embedding, p=2, dim=-1, eps=1e-6)
@@ -488,50 +501,64 @@ class QFormerBase(nn.Module):
             device=self.device
         )
 
-        # FIX: Use projected text embeddings for consistency
-        text_embeddings_all = torch.cat([
-            text_embeddings_projected, text_embeddings_projected, text_embeddings_negative], dim=0)
+        # ============ BLIP-style ITM ============
+        # Key insight: Reuse queries from ITC for positive samples, only compute new for negatives
         
-        image_embeddings_all = torch.cat([
-            image_features, image_embeddings_negative, image_features], dim=0)
-        
-        attention_mask_all = torch.cat([
-            self.generate_attention_mask(
-                task='itm',
-                query_len=queries.shape[1],
-                pad_mask=question_tokens['attention_mask'],
-                device=self.device
-            ),
-            self.generate_attention_mask(
-                task='itm',
-                query_len=queries.shape[1],
-                pad_mask=question_tokens['attention_mask'],
-                device=self.device
-            ),
-            attention_masks_negative,
-        ], dim=0)
-
-        queries_itm = self.learned_queries.expand(image_embeddings_all.shape[0], -1, -1).clone()
-
-        queries_itm, _ = self.cross_modal_transformer(
-            queries_itm,            # FIX: queries first
-            image_embeddings_all,   # FIX: image second
-            text_embeddings=text_embeddings_all,
-            attention_mask=attention_mask_all
+        # For NEGATIVE pairs: need to run cross_modal_transformer with wrong pairs
+        # Negative type 1: (wrong_image, correct_text)
+        attention_mask_neg1 = self.generate_attention_mask(
+            task='itm',
+            query_len=queries.shape[1],
+            pad_mask=question_tokens['attention_mask'],
+            device=self.device
         )
-
-        # Perform itm head
-        itm_embeddings = self.itm_head(queries_itm) # (batch_size * 3, num_queries, 2)
-        logits = torch.mean(itm_embeddings, dim=1) # (batch_size * 3, 2)
+        queries_neg1 = self.learned_queries.expand(batch_size, -1, -1).clone()
+        queries_neg1, _ = self.cross_modal_transformer(
+            queries_neg1,
+            image_embeddings_negative,  # wrong image
+            text_embeddings=text_embeddings_projected,  # correct text
+            attention_mask=attention_mask_neg1
+        )
+        
+        # Negative type 2: (correct_image, wrong_text)  
+        queries_neg2 = self.learned_queries.expand(batch_size, -1, -1).clone()
+        queries_neg2, _ = self.cross_modal_transformer(
+            queries_neg2,
+            image_features,  # correct image
+            text_embeddings=text_embeddings_negative,  # wrong text
+            attention_mask=attention_masks_negative
+        )
+        
+        # BLIP-style: Use FIRST query as [CLS] token for ITM prediction
+        # Positive: use queries from ITC (already computed above)
+        queries_pos_cls = queries[:, 0, :]  # (batch_size, dim) - reuse ITC queries!
+        queries_neg1_cls = queries_neg1[:, 0, :]  # (batch_size, dim)
+        queries_neg2_cls = queries_neg2[:, 0, :]  # (batch_size, dim)
+        
+        # Stack all [CLS] representations
+        itm_cls_features = torch.cat([queries_pos_cls, queries_neg1_cls, queries_neg2_cls], dim=0)
+        
+        # ITM head on [CLS] token only
+        logits = self.itm_head[0](itm_cls_features)  # First linear
+        logits = self.itm_head[1](logits)  # GELU
+        logits = self.itm_head[2](logits)  # Dropout
+        logits = self.itm_head[3](logits)  # Final linear -> (batch_size * 3, 2)
 
         itm_labels = torch.cat([
-            torch.ones(batch_size, dtype=torch.long),   # Positive: (image, text)
+            torch.ones(batch_size, dtype=torch.long),   # Positive: (image, text) - matched
             torch.zeros(batch_size, dtype=torch.long),  # Negative: (wrong_image, text)
-            torch.zeros(batch_size, dtype=torch.long)   # FIX: Negative: (image, wrong_text)
+            torch.zeros(batch_size, dtype=torch.long)   # Negative: (image, wrong_text)
         ], dim=0).to(self.device)
 
-        # v2 IMPROVEMENT: Use configurable label smoothing for ITM
-        loss_itm = F.cross_entropy(logits, itm_labels, label_smoothing=self.label_smoothing_itm)
+        # Use class weights for 1:2 imbalance
+        itm_class_weights = torch.tensor([1.0, 2.0], device=self.device)
+        
+        loss_itm = F.cross_entropy(logits, itm_labels, weight=itm_class_weights,
+                                   label_smoothing=self.label_smoothing_itm)
+        
+        # Calculate ITM accuracy
+        itm_predictions = torch.argmax(logits, dim=-1)
+        itm_accuracy = (itm_predictions == itm_labels).float().mean()
 
         # Image Grounded Text Generation (IGT)
         igt_input_ids = question_tokens['input_ids'].clone()
@@ -636,6 +663,7 @@ class QFormerBase(nn.Module):
 
         return {
             'answer_accuracy': answer_accuracy,
+            'itm_accuracy': itm_accuracy,
             'loss_answer': loss_answer,
             'loss_itc': loss_itc,
             'loss_itm': loss_itm,

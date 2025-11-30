@@ -65,6 +65,17 @@ class QFormerBaseLightning(pl.LightningModule):
         logger.info(f"Trainable ratio: {100*trainable_params/total_params:.2f}%")
         logger.info("=" * 60)
 
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        """Transfer nested dict batch to device - handles image_input dict."""
+        if isinstance(batch, dict):
+            for key, value in batch.items():
+                if isinstance(value, dict):
+                    batch[key] = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                                  for k, v in value.items()}
+                elif isinstance(value, torch.Tensor):
+                    batch[key] = value.to(device)
+        return batch
+
     def forward(self, samples: dict):
         return self.q_former_base(samples)
     
@@ -72,6 +83,8 @@ class QFormerBaseLightning(pl.LightningModule):
         output = self.forward(batch)
 
         self.log(f"{task}_answer_accuracy", output['answer_accuracy'], prog_bar=True, on_step=True, on_epoch=True, logger=True,
+                 batch_size=self.hyperparams['batch_size'])
+        self.log(f"{task}_itm_accuracy", output['itm_accuracy'], prog_bar=True, on_step=True, on_epoch=True, logger=True,
                  batch_size=self.hyperparams['batch_size'])
         self.log(f"{task}_loss_itc", output['loss_itc'], prog_bar=True, on_step=True, on_epoch=True, logger=True,
                  batch_size=self.hyperparams['batch_size'])
