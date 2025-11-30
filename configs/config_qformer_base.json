@@ -23,7 +23,7 @@
   "temperature_min": 0.05,
   "temperature_max": 1.0,
     
-  "label_smoothing_answer": 0.2,
+  "label_smoothing_answer": 0.1,
   "label_smoothing_itc": 0.1,
   "label_smoothing_itm": 0.1,
     

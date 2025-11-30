@@ -115,13 +115,12 @@ class QFormerBase(nn.Module):
 
         self.lm_head = nn.Linear(qformer_hidden_size, self.tokenizer.vocab_size)
 
-        # Answer head with strong regularization to prevent overfitting
+        # Improved answer head with more capacity and dropout
         self.answer_head = nn.Sequential(
-            nn.Dropout(0.5),  # Heavy dropout BEFORE first layer
-            nn.Linear(qformer_hidden_size, qformer_hidden_size // 4),  # Smaller capacity
+            nn.Linear(qformer_hidden_size, qformer_hidden_size // 2),
             nn.GELU(),
-            nn.Dropout(0.5),  # Heavy dropout
-            nn.Linear(qformer_hidden_size // 4, 1)
+            nn.Dropout(dropout_rate),
+            nn.Linear(qformer_hidden_size // 2, 1)
         )
 
         self.cat_mlp = nn.Sequential(
