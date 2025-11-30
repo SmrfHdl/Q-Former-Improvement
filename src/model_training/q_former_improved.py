@@ -49,6 +49,8 @@ class QFormerImprovedLightning(pl.LightningModule):
         # Log all metrics
         self.log(f"{task}_answer_accuracy", output['answer_accuracy'], prog_bar=True, on_step=True, on_epoch=True, logger=True,
                  batch_size=self.hyperparams['batch_size'])
+        self.log(f"{task}_itm_accuracy", output['itm_accuracy'], prog_bar=True, on_step=True, on_epoch=True, logger=True,
+                 batch_size=self.hyperparams['batch_size'])
         self.log(f"{task}_loss_itc", output['loss_itc'], prog_bar=True, on_step=True, on_epoch=True, logger=True,
                  batch_size=self.hyperparams['batch_size'])
         self.log(f"{task}_loss_igt", output['loss_igt'], prog_bar=True, on_step=True, on_epoch=True, logger=True,

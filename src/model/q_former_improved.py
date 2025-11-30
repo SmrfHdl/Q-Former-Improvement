@@ -78,9 +78,9 @@ class ObjectDetectionPath(nn.Module):
         
         # Predict spatial information and confidence
         spatial_info = torch.sigmoid(self.spatial_head(object_features))  # Normalize to [0, 1]
-        confidence = torch.sigmoid(self.confidence_head(object_features))
+        confidence_logits = self.confidence_head(object_features)  # Return logits for BCE with logits
         
-        return object_features, spatial_info, confidence
+        return object_features, spatial_info, confidence_logits
 
 
 class RelationReasoningPath(nn.Module):
@@ -220,9 +220,19 @@ class GlobalReasoningPath(nn.Module):
         self.relation_gate = HierarchicalGate(dim)
         
         # Task-specific heads
-        self.itm_head = nn.Linear(dim, 2)  # Image-Text Matching
+        self.itm_head = nn.Sequential(
+            nn.Linear(dim, dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim // 2, 2)
+        )  # Image-Text Matching
         self.lm_head = nn.Linear(dim, vocab_size)  # Language Modeling
-        self.answer_head = nn.Linear(dim, 1)  # Binary Answer Prediction
+        self.answer_head = nn.Sequential(
+            nn.Linear(dim, dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim // 2, 1)
+        )  # Binary Answer Prediction with regularization
         
     def forward(self, object_features: torch.Tensor, relation_features: torch.Tensor,
                 image_features: torch.Tensor, text_embeddings: torch.Tensor,
@@ -269,13 +279,13 @@ class GlobalReasoningPath(nn.Module):
             global_features = reasoning_layer(global_features)
         
         # Task-specific predictions
-        # ITM: Use mean pooled global features
-        itm_logits = self.itm_head(global_features.mean(dim=1))
+        # ITM: Use first query as [CLS] token (BLIP-style)
+        itm_logits = self.itm_head(global_features[:, 0, :])
         
         # LM: Use updated text embeddings
         lm_logits = self.lm_head(updated_text)
         
-        # Answer: Use max pooled global features
+        # Answer: Use max pooled global features for most relevant info
         answer_logits = self.answer_head(global_features.max(dim=1)[0])
         
         return global_features, itm_logits, lm_logits, answer_logits
@@ -508,10 +518,10 @@ class QFormerImproved(nn.Module):
         """
         image_input = samples['image_input']
         question = samples['question']
-        batch_size = image_input.shape[0]
 
         # Encode vision and text
         image_features = self.vision_encoder.encode(image_input)
+        batch_size = image_features.shape[0]
         image_features = self.vision_projection(image_features)
         image_features = self.vision_norm(image_features)
         image_features = self.vision_dropout(image_features)
@@ -531,15 +541,18 @@ class QFormerImproved(nn.Module):
             device=self.device
         )
         
-        object_features, spatial_info, object_confidence = self.object_path(
+        object_features, spatial_info, object_confidence_logits = self.object_path(
             image_features, text_embeddings, attention_mask_l1
         )
         
-        # Auxiliary loss for object detection (objectness)
-        loss_object = F.binary_cross_entropy(
-            object_confidence.squeeze(-1),
-            torch.ones_like(object_confidence.squeeze(-1)) * 0.5  # Weak supervision
+        # Auxiliary loss for object detection (objectness) - use logits version for autocast safety
+        loss_object = F.binary_cross_entropy_with_logits(
+            object_confidence_logits.squeeze(-1),
+            torch.ones_like(object_confidence_logits.squeeze(-1)) * 0.5  # Weak supervision
         )
+        
+        # Get probabilities for visualization/return
+        object_confidence = torch.sigmoid(object_confidence_logits)
 
         # === LEVEL 2: Relation Reasoning Path ===
         attention_mask_l2 = self.generate_attention_mask(
@@ -597,7 +610,7 @@ class QFormerImproved(nn.Module):
         loss_itc = (F.cross_entropy(sim_i2t, targets, label_smoothing=0.1) +
                     F.cross_entropy(sim_t2i, targets, label_smoothing=0.1)) / 2
 
-        # === Image-Text Matching (ITM) Loss ===
+        # === Image-Text Matching (ITM) Loss with BLIP-style hard negatives ===
         with torch.no_grad():
             sim_i2t_clone = sim_i2t.clone()
             sim_t2i_clone = sim_t2i.clone()
@@ -613,10 +626,61 @@ class QFormerImproved(nn.Module):
                                   torch.ones_like(weights_t2i) / batch_size, weights_t2i)
         weights_i2t = torch.where(torch.isnan(weights_i2t) | torch.isinf(weights_i2t),
                                   torch.ones_like(weights_i2t) / batch_size, weights_i2t)
+        
+        # Ensure weights sum to 1
+        weights_t2i = weights_t2i + 1e-8
+        weights_i2t = weights_i2t + 1e-8
+        weights_t2i = weights_t2i / weights_t2i.sum(dim=-1, keepdim=True)
+        weights_i2t = weights_i2t / weights_i2t.sum(dim=-1, keepdim=True)
 
-        # Sample hard negatives and compute ITM for positive + negative pairs
-        itm_labels_pos = torch.ones(batch_size, dtype=torch.long, device=self.device)
-        loss_itm = F.cross_entropy(itm_logits, itm_labels_pos)
+        # Sample hard negatives for ITM
+        # Negative type 1: wrong image + correct text
+        neg_image_indices = []
+        for b in range(batch_size):
+            try:
+                neg_idx = torch.multinomial(weights_t2i[b], 1).item()
+            except RuntimeError:
+                neg_idx = torch.argmax(weights_t2i[b]).item()
+            neg_image_indices.append(neg_idx)
+        
+        # Negative type 2: correct image + wrong text
+        neg_text_indices = []
+        for b in range(batch_size):
+            try:
+                neg_idx = torch.multinomial(weights_i2t[b], 1).item()
+            except RuntimeError:
+                neg_idx = torch.argmax(weights_i2t[b]).item()
+            neg_text_indices.append(neg_idx)
+        
+        # Run global path for negative pairs
+        neg_image_features = image_features[neg_image_indices]
+        neg_text_embeddings = text_embeddings[torch.tensor(neg_text_indices, device=self.device)]
+        
+        # Negative 1: wrong image + correct text
+        _, itm_logits_neg1, _, _ = self.global_path(
+            object_features, relation_features, neg_image_features, text_embeddings, attention_mask_l3
+        )
+        
+        # Negative 2: correct image + wrong text  
+        _, itm_logits_neg2, _, _ = self.global_path(
+            object_features, relation_features, image_features, neg_text_embeddings, attention_mask_l3
+        )
+        
+        # Combine all ITM logits
+        itm_logits_all = torch.cat([itm_logits, itm_logits_neg1, itm_logits_neg2], dim=0)
+        itm_labels = torch.cat([
+            torch.ones(batch_size, dtype=torch.long, device=self.device),   # Positive
+            torch.zeros(batch_size, dtype=torch.long, device=self.device),  # Negative 1
+            torch.zeros(batch_size, dtype=torch.long, device=self.device)   # Negative 2
+        ], dim=0)
+        
+        # Class weights for 1:2 imbalance
+        itm_class_weights = torch.tensor([1.0, 2.0], device=self.device)
+        loss_itm = F.cross_entropy(itm_logits_all, itm_labels, weight=itm_class_weights)
+        
+        # ITM accuracy
+        itm_predictions = torch.argmax(itm_logits_all, dim=-1)
+        itm_accuracy = (itm_predictions == itm_labels).float().mean()
 
         # === Image Grounded Text Generation (IGT) Loss ===
         igt_input_ids = question_tokens['input_ids'].clone()
@@ -632,7 +696,7 @@ class QFormerImproved(nn.Module):
             ignore_index=-100
         )
 
-        # === Answer Prediction Loss ===
+        # === Answer Prediction Loss with label smoothing ===
         answers = samples['answer']
         answer_dict = {'yes': 1, 'no': 0}
         answer_labels = torch.tensor(
@@ -640,24 +704,26 @@ class QFormerImproved(nn.Module):
             dtype=torch.float, device=self.device
         ).unsqueeze(1)
         
-        loss_answer = F.binary_cross_entropy_with_logits(answer_logits, answer_labels)
+        # Apply label smoothing for binary classification
+        label_smoothing = 0.1
+        smoothed_labels = answer_labels * (1 - label_smoothing) + label_smoothing / 2
+        loss_answer = F.binary_cross_entropy_with_logits(answer_logits, smoothed_labels)
         
         predictions = (torch.sigmoid(answer_logits) > 0.5).float()
         answer_accuracy = (predictions == answer_labels).float().mean()
 
         # === Total Loss with Hierarchical Weighting ===
-        # Level 1 auxiliary: 0.1
-        # Level 2 auxiliary: 0.1
-        # Level 3 main tasks: higher weights
-        total_loss = (0.1 * loss_object +
-                      0.1 * loss_relation +
-                      0.3 * loss_itc +
-                      0.5 * loss_itm +
-                      0.05 * loss_igt +
-                      1.0 * loss_answer)
+        # Reduced auxiliary losses, focus on main tasks
+        total_loss = (0.05 * loss_object +    # Weak supervision, reduce weight
+                      0.05 * loss_relation +  # Weak supervision, reduce weight
+                      1.0 * loss_itc +        # Main contrastive
+                      1.0 * loss_itm +        # Main matching (now with hard negatives)
+                      0.0 * loss_igt +        # Disable for VQA
+                      2.0 * loss_answer)      # Focus on VQA
 
         return {
             'answer_accuracy': answer_accuracy,
+            'itm_accuracy': itm_accuracy,
             'loss_answer': loss_answer,
             'loss_itc': loss_itc,
             'loss_itm': loss_itm,

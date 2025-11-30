@@ -1,0 +1,2 @@
+run_id,seed,test_accuracy,test_auc,test_answer_accuracy_epoch,test_itm_accuracy_epoch,test_loss_itc_epoch,test_loss_igt_epoch,test_loss_itm_epoch,test_loss_answer_epoch,test_loss_object_epoch,test_loss_relation_epoch,test_total_loss_epoch
+0,77,0.6949965357780457,N/A,0.6949965357780457,0.6142036318778992,0.9585849046707153,11.2141752243042,0.5222698450088501,0.6220648288726807,0.6931490898132324,0.0004437594034243375,2.7596640586853027
