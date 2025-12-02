@@ -1,0 +1,2 @@
+model,encoder,accuracy_mean,accuracy_std,auc_mean,auc_std,num_runs
+qformer_base,clip,0.4807010491689046,0.04465301363574189,0.5016562615246826,0.015170278603503886,3

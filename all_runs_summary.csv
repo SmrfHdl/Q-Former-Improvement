@@ -1,0 +1,4 @@
+model,encoder,run_id,seed,gpu,status,test_accuracy,test_auc
+qformer_base,clip,0,77,0,COMPLETED,0.454920619726181,0.5041241899794532
+qformer_base,clip,1,78,0,COMPLETED,0.5322619080543518,0.5154412636320531
+qformer_base,clip,2,79,0,COMPLETED,0.454920619726181,0.4854033309625415
