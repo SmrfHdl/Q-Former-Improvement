@@ -26,3 +26,5 @@ logs/
 .github/
 guideline.txt
 2023 Huong dan viet khoa luan.pdf
+
+*.zip
