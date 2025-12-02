@@ -37,6 +37,7 @@ def set_seed(seed: int):
 def train(model_name: str,
           use_clip_for_text: bool,
           gpu_device: int = 0,
+          num_gpus: int = None,
           results_dir: str = "../results",
           models_dir: str = "../saved_models",
           config_dir: str = "../configs",
@@ -49,12 +50,17 @@ def train(model_name: str,
           wandb_entity: str = None):
     logger.info(f"Starting run {run_id} with seed {seed}")
     logger.info(f"Use_clip_for_text: {use_clip_for_text}")
-    logger.info(f"GPU device: {gpu_device}")
+    
+    # Multi-GPU setup
+    if num_gpus is not None and num_gpus > 1:
+        logger.info(f"Multi-GPU training enabled: {num_gpus} GPUs")
+        device = torch.device("cuda:0")  # Primary device for model initialization
+    else:
+        logger.info(f"GPU device: {gpu_device}")
+        gpu_device = gpu_device if torch.cuda.is_available() else None
+        device = torch.device(f"cuda:{gpu_device}" if gpu_device is not None else "cpu")
 
     set_seed(seed)
-
-    gpu_device = gpu_device if torch.cuda.is_available() else None
-    device = torch.device(f"cuda:{gpu_device}" if gpu_device is not None else "cpu")
 
     # Convert config_dir to absolute path
     config_dir_path = Path(config_dir).resolve()
@@ -282,10 +288,27 @@ def train(model_name: str,
     # Get precision from config (default to bf16-mixed for H100)
     precision = hyperparams.get('precision', 'bf16-mixed')
     
+    # Multi-GPU configuration
+    config_num_gpus = hyperparams.get('num_gpus', 1)
+    actual_num_gpus = num_gpus if num_gpus is not None else config_num_gpus
+    strategy = hyperparams.get('strategy', 'auto')
+    
+    if actual_num_gpus > 1:
+        # Multi-GPU training with DDP
+        devices = actual_num_gpus
+        if strategy == 'auto':
+            strategy = 'ddp'
+        logger.info(f"Using {actual_num_gpus} GPUs with {strategy} strategy")
+    else:
+        # Single GPU training
+        devices = [gpu_device] if gpu_device is not None else None
+        strategy = 'auto'
+    
     trainer = pl.Trainer(
         max_epochs=hyperparams.get('num_epochs', 100),
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-        devices=[gpu_device] if gpu_device is not None else None,
+        devices=devices,
+        strategy=strategy,
         logger=loggers,
         callbacks=[early_stopping, metrics_callback, checkpoint_callback],
         log_every_n_steps=10,
@@ -455,6 +478,9 @@ if __name__ == "__main__":
     parser.add_argument("--gpu_device", type=int, default=0,
                         help="Index of the GPU to use (e.g., 0, 1, 2, ...). Defaults to 0.")
 
+    parser.add_argument("--num_gpus", type=int, default=None,
+                        help="Number of GPUs for multi-GPU training. If set, overrides gpu_device and uses DDP. (default: None = single GPU)")
+
     parser.add_argument("--results_dir", type=str, default="../results",
                         help="Directory to save results and metrics (default: '../results')")
 
@@ -491,6 +517,7 @@ if __name__ == "__main__":
         model_name=args.model_name,
         use_clip_for_text=args.use_clip_for_text,
         gpu_device=args.gpu_device,
+        num_gpus=args.num_gpus,
         results_dir=args.results_dir,
         models_dir=args.models_dir,
         config_dir=args.config_dir,

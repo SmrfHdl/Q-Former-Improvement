@@ -1,0 +1,41 @@
+{
+  "qformer_hidden_size": 768,
+  "blocks_num": 6,
+  "num_heads": 12,
+  "num_object_queries": 32,
+  "num_relation_queries": 48,
+  "num_global_queries": 32,
+  "num_epochs": 50,
+  "batch_size": 64,
+  "lr": 1.5e-4,
+  "betas": [0.9, 0.999],
+  "dropout_rate": 0.3,
+  "weight_decay": 0.05,
+  "eps": 1e-8,
+  "sequence_size": 32,
+  "unfreeze_layers": 0,
+  "use_clip_for_text": true,
+  "gradient_clip_norm": 1.0,
+  "warmup_steps": 300,
+  "patience": 7,
+  "seed": 42,
+  
+  "num_workers": 8,
+  "pin_memory": true,
+  "precision": "bf16-mixed",
+  
+  "use_data_augmentation": true,
+  "augmentation_prob": 0.7,
+
+  "num_gpus": 2,
+  "strategy": "ddp",
+  
+  "comments": {
+    "batch_size": "64 per GPU -> effective batch size = 128 with 2 GPUs",
+    "lr": "1.5e-4 - slightly higher due to larger effective batch size (linear scaling)",
+    "warmup_steps": "300 - adjusted for 2x throughput",
+    "num_workers": "8 per process - total 16 workers for data loading",
+    "strategy": "ddp - Distributed Data Parallel for multi-GPU training"
+  }
+}
+

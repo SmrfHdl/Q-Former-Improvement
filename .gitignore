@@ -13,7 +13,8 @@ vqa_coco_dataset/
 
 bla.py
 bla.ipynb
-utils/
+
+*.env
 
 results/wandb
 results/plots
@@ -21,7 +22,8 @@ results/*.ckpt
 results/all_runs_summary.csv
 logs/
 
-*.zip
+utils/
+res.zip
 
 .github/
 guideline.txt

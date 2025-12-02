@@ -1,0 +1,1 @@
+uv run scripts/run.py --gpus 0 --models qformer_base --encoders clip --num_runs 1 --base_seed 77 --save_learning_curves True --generate_plots True --use_wandb True --wandb_project q_former_base_v3
