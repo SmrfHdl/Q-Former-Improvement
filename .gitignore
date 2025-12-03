@@ -23,7 +23,7 @@ results/all_runs_summary.csv
 logs/
 
 utils/
-res.zip
+*.zip
 
 .github/
 guideline.txt
