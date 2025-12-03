@@ -1,31 +1,38 @@
+"""
+Lightning module for Q-Former Improved Open-Ended VQA.
+"""
+
 import pytorch_lightning as pl
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
-from model.q_former_improved import QFormerImproved
+from model.q_former_improved_openended import QFormerImprovedOpenEnded
 import torch
 
 from loguru import logger
 
-class QFormerImprovedLightning(pl.LightningModule):
+
+class QFormerImprovedOpenEndedLightning(pl.LightningModule):
     def __init__(self,
                  hyperparams: dict,
+                 num_answers: int,
                  device: torch.device):
         super().__init__()
         self.save_hyperparameters()
 
         self.hyperparams = hyperparams
+        self.num_answers = num_answers
 
-        self.q_former_improved = QFormerImproved(
+        self.q_former_improved = QFormerImprovedOpenEnded(
             sequence_size=hyperparams["sequence_size"],
             qformer_hidden_size=hyperparams["qformer_hidden_size"],
-            blocks_num=self.hyperparams["blocks_num"],
+            blocks_num=hyperparams["blocks_num"],
             num_heads=hyperparams["num_heads"],
+            num_answers=num_answers,
             num_object_queries=hyperparams.get("num_object_queries", 32),
             num_relation_queries=hyperparams.get("num_relation_queries", 64),
             num_global_queries=hyperparams.get("num_global_queries", 32),
-            # New parameters for improved architecture
-            num_reasoning_hops=hyperparams.get("num_reasoning_hops", 4),  # NSM hops
-            num_relation_types=hyperparams.get("num_relation_types", 16),  # SGG relation types
+            num_reasoning_hops=hyperparams.get("num_reasoning_hops", 4),
+            num_relation_types=hyperparams.get("num_relation_types", 16),
             dropout_rate=hyperparams["dropout_rate"],
             use_clip_for_text=hyperparams["use_clip_for_text"],
             unfreeze_layers=hyperparams["unfreeze_layers"],
@@ -33,7 +40,7 @@ class QFormerImprovedLightning(pl.LightningModule):
         )
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        """Transfer nested dict batch to device - handles image_input dict."""
+        """Transfer nested dict batch to device."""
         if isinstance(batch, dict):
             for key, value in batch.items():
                 if isinstance(value, dict):
@@ -90,7 +97,6 @@ class QFormerImprovedLightning(pl.LightningModule):
         output = self._common_step(batch, task="train")
         total_loss = output['total_loss']
         
-        # Skip backward if loss is NaN or Inf to prevent weight corruption
         if torch.isnan(total_loss) or torch.isinf(total_loss):
             logger.warning(f"NaN/Inf detected in total_loss, skipping backward pass")
             return None
@@ -98,8 +104,7 @@ class QFormerImprovedLightning(pl.LightningModule):
         return total_loss
     
     def on_after_backward(self):
-        """Check for NaN/Inf in weights and gradients after backward pass."""
-        # Check projection layer weights for corruption
+        """Check for NaN/Inf in weights after backward pass."""
         vision_proj_weight = self.q_former_improved.vision_projection.weight
         text_proj_weight = self.q_former_improved.text_projection.weight
         
@@ -128,10 +133,8 @@ class QFormerImprovedLightning(pl.LightningModule):
             eps=self.hyperparams['eps']
         )
         
-        # Add warm-up scheduler: linear warm-up for first 500 steps (reasonable for typical VQA datasets)
-        # With batch_size=48 and ~10k samples, 500 steps = ~2.4 epochs of warmup
         def lr_lambda(current_step: int):
-            warmup_steps = self.hyperparams.get('warmup_steps', 500)  # Use config or default 500
+            warmup_steps = self.hyperparams.get('warmup_steps', 500)
             if current_step < warmup_steps:
                 return float(current_step) / float(max(1, warmup_steps))
             return 1.0
@@ -153,7 +156,6 @@ class QFormerImprovedLightning(pl.LightningModule):
         gradient_clip_val=None,
         gradient_clip_algorithm=None
     ):
-        """Configure gradient clipping to prevent gradient explosion."""
         self.clip_gradients(
             optimizer,
             gradient_clip_val=1.0,
@@ -162,3 +164,4 @@ class QFormerImprovedLightning(pl.LightningModule):
     
     def save_checkpoint(self, file_path: str):
         self.trainer.save_checkpoint(file_path)
+
