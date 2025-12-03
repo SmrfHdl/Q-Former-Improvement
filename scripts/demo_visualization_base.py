@@ -1,13 +1,3 @@
-"""
-Demo script to visualize Q-Former BASE attention.
-
-Usage:
-    python scripts/demo_visualization_base.py \
-        --checkpoint results/qformer_base_clip/checkpoints/best.ckpt \
-        --image path/to/image.jpg \
-        --question "Is there a cat?"
-"""
-
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))

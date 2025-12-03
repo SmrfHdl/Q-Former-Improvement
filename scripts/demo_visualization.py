@@ -1,13 +1,3 @@
-"""
-Demo script to visualize Q-Former Improved object detection and attention.
-
-Usage:
-    python scripts/demo_visualization.py --checkpoint <path> --image <path> --question "Is there a dog?"
-    
-Or run on multiple samples:
-    python scripts/demo_visualization.py --checkpoint <path> --data_file <path> --num_samples 5
-"""
-
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
