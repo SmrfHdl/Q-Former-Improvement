@@ -1,10 +1,3 @@
-"""
-Q-Former Improved for Generative Open-Ended VQA.
-
-Combines SGG + NSM architecture with generative answer output.
-Evaluation: Normalized exact match accuracy.
-"""
-
 import re
 import torch
 import torch.nn as nn

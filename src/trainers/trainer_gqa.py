@@ -1,14 +1,3 @@
-"""
-Trainer for GQA Visual Reasoning VQA models.
-
-Uses GQA dataset with:
-- train_balanced: Training split
-- val_balanced: Validation split  
-- test_balanced: Test split
-
-Evaluation: Normalized Exact Match accuracy
-"""
-
 import torch
 import os
 import sys
