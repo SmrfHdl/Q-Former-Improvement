@@ -1,12 +1,4 @@
-"""
-Q-Former Base for Generative Open-Ended VQA.
-
-This model GENERATES answer text instead of classifying into fixed vocabulary.
-- Training: Condition on image + question, generate answer text
-- Inference: Auto-regressive generation of answer
-- Evaluation: Compare generated text with ground truth (exact/soft match)
-"""
-
+import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +7,54 @@ from transformers import BertTokenizer, BertModel
 from layers.cross_modal_transformer import CrossModalTransformer
 from model.clip_vit import VisionEncoder
 from loguru import logger
+
+
+def normalize_answer(answer: str) -> str:
+    """
+    Normalize answer for exact match comparison.
+    
+    Follows standard VQA normalization:
+    - Lowercase
+    - Remove articles (a, an, the)
+    - Remove punctuation
+    - Remove extra whitespace
+    - Convert number words to digits
+    """
+    answer = answer.lower().strip()
+    
+    # Remove punctuation
+    answer = re.sub(r'[^\w\s]', '', answer)
+    
+    # Remove articles
+    articles = ['a', 'an', 'the']
+    words = answer.split()
+    words = [w for w in words if w not in articles]
+    answer = ' '.join(words)
+    
+    # Number word to digit mapping
+    number_map = {
+        'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+        'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
+        'ten': '10', 'eleven': '11', 'twelve': '12', 'thirteen': '13',
+        'fourteen': '14', 'fifteen': '15', 'sixteen': '16', 'seventeen': '17',
+        'eighteen': '18', 'nineteen': '19', 'twenty': '20'
+    }
+    
+    words = answer.split()
+    words = [number_map.get(w, w) for w in words]
+    answer = ' '.join(words)
+    
+    # Remove extra whitespace
+    answer = ' '.join(answer.split())
+    
+    return answer
+
+
+def compute_exact_match(prediction: str, ground_truth: str) -> float:
+    """Compute exact match after normalization."""
+    pred_normalized = normalize_answer(prediction)
+    gt_normalized = normalize_answer(ground_truth)
+    return 1.0 if pred_normalized == gt_normalized else 0.0
 
 
 class QFormerBaseGenerative(nn.Module):
@@ -505,10 +545,10 @@ class QFormerBaseGenerative(nn.Module):
                 image_features, questions, max_length=self.max_answer_length
             )
             
-            # Calculate exact match accuracy
+            # Calculate normalized exact match accuracy
             correct = sum(
-                1 for gen, gt in zip(generated_answers, answers)
-                if gen.lower().strip() == gt.lower().strip()
+                compute_exact_match(gen, gt)
+                for gen, gt in zip(generated_answers, answers)
             )
             answer_accuracy = torch.tensor(correct / batch_size, device=self.device)
 

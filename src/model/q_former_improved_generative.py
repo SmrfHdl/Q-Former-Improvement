@@ -2,8 +2,10 @@
 Q-Former Improved for Generative Open-Ended VQA.
 
 Combines SGG + NSM architecture with generative answer output.
+Evaluation: Normalized exact match accuracy.
 """
 
+import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,6 +14,54 @@ from transformers import BertTokenizer, BertModel
 from layers.cross_modal_transformer import CrossModalTransformer
 from model.clip_vit import VisionEncoder
 from loguru import logger
+
+
+def normalize_answer(answer: str) -> str:
+    """
+    Normalize answer for exact match comparison.
+    
+    Follows standard VQA normalization:
+    - Lowercase
+    - Remove articles (a, an, the)
+    - Remove punctuation
+    - Remove extra whitespace
+    - Convert number words to digits
+    """
+    answer = answer.lower().strip()
+    
+    # Remove punctuation
+    answer = re.sub(r'[^\w\s]', '', answer)
+    
+    # Remove articles
+    articles = ['a', 'an', 'the']
+    words = answer.split()
+    words = [w for w in words if w not in articles]
+    answer = ' '.join(words)
+    
+    # Number word to digit mapping
+    number_map = {
+        'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+        'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
+        'ten': '10', 'eleven': '11', 'twelve': '12', 'thirteen': '13',
+        'fourteen': '14', 'fifteen': '15', 'sixteen': '16', 'seventeen': '17',
+        'eighteen': '18', 'nineteen': '19', 'twenty': '20'
+    }
+    
+    words = answer.split()
+    words = [number_map.get(w, w) for w in words]
+    answer = ' '.join(words)
+    
+    # Remove extra whitespace
+    answer = ' '.join(answer.split())
+    
+    return answer
+
+
+def compute_exact_match(prediction: str, ground_truth: str) -> float:
+    """Compute exact match after normalization."""
+    pred_normalized = normalize_answer(prediction)
+    gt_normalized = normalize_answer(ground_truth)
+    return 1.0 if pred_normalized == gt_normalized else 0.0
 
 # Import components from improved model
 from model.q_former_improved import (
@@ -440,10 +490,13 @@ class QFormerImprovedGenerative(nn.Module):
                       0.5 * loss_itm +
                       2.0 * loss_generation)
 
-        # Generate for accuracy
+        # Generate for accuracy (normalized exact match)
         with torch.no_grad():
             generated_answers = self.generate(image_features, enriched_objects, relation_features, questions)
-            correct = sum(1 for gen, gt in zip(generated_answers, answers) if gen.lower().strip() == gt.lower().strip())
+            correct = sum(
+                compute_exact_match(gen, gt)
+                for gen, gt in zip(generated_answers, answers)
+            )
             answer_accuracy = torch.tensor(correct / batch_size, device=self.device)
 
         return {

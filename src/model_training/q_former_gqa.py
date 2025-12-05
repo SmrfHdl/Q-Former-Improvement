@@ -1,7 +1,3 @@
-"""
-Lightning modules for Generative VQA models.
-"""
-
 import pytorch_lightning as pl
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
@@ -9,16 +5,19 @@ import torch
 
 from loguru import logger
 
+# Import exact match computation
+from datasets.dataset_gqa import compute_batch_exact_match, normalize_answer
+from model.q_former_base_generative import QFormerBaseGenerative
 
-class QFormerBaseGenerativeLightning(pl.LightningModule):
-    """Lightning module for QFormerBaseGenerative."""
+
+class QFormerBaseGQALightning(pl.LightningModule):
+    """Lightning module for QFormerBase on GQA dataset."""
     
     def __init__(self, hyperparams: dict, device: torch.device):
         super().__init__()
         self.save_hyperparameters()
         self.hyperparams = hyperparams
         
-        from model.q_former_base_generative import QFormerBaseGenerative
         
         self.model = QFormerBaseGenerative(
             sequence_size=hyperparams["sequence_size"],
@@ -46,10 +45,21 @@ class QFormerBaseGenerativeLightning(pl.LightningModule):
     def forward(self, samples: dict):
         return self.model(samples)
     
+    def _compute_exact_match(self, generated: list[str], ground_truth: list[str]) -> float:
+        """Compute normalized exact match accuracy."""
+        return compute_batch_exact_match(generated, ground_truth)
+    
     def _common_step(self, batch: dict, task: str):
         output = self.forward(batch)
+        
+        # Compute normalized exact match
+        exact_match = self._compute_exact_match(
+            output['generated_answers'],
+            output['ground_truth_answers']
+        )
+        exact_match_tensor = torch.tensor(exact_match, device=self.device)
 
-        self.log(f"{task}_answer_accuracy", output['answer_accuracy'], prog_bar=True, 
+        self.log(f"{task}_exact_match", exact_match_tensor, prog_bar=True, 
                  on_step=True, on_epoch=True, batch_size=self.hyperparams['batch_size'])
         self.log(f"{task}_loss_generation", output['loss_generation'], prog_bar=True,
                  on_step=True, on_epoch=True, batch_size=self.hyperparams['batch_size'])
@@ -62,12 +72,19 @@ class QFormerBaseGenerativeLightning(pl.LightningModule):
         
         # Log some generated examples periodically
         if task == "val" and self.global_step % 100 == 0:
+            logger.info(f"=== Sample predictions (step {self.global_step}) ===")
             for i in range(min(3, len(output['generated_answers']))):
+                gt = output['ground_truth_answers'][i]
+                gen = output['generated_answers'][i]
+                gt_norm = normalize_answer(gt)
+                gen_norm = normalize_answer(gen)
+                match = "✓" if gt_norm == gen_norm else "✗"
                 logger.info(f"Q: {batch['question'][i]}")
-                logger.info(f"GT: {output['ground_truth_answers'][i]}")
-                logger.info(f"Gen: {output['generated_answers'][i]}")
+                logger.info(f"GT: {gt} -> '{gt_norm}'")
+                logger.info(f"Gen: {gen} -> '{gen_norm}' [{match}]")
                 logger.info("---")
-
+        
+        output['exact_match'] = exact_match_tensor
         return output
     
     def training_step(self, batch: dict):
@@ -108,8 +125,8 @@ class QFormerBaseGenerativeLightning(pl.LightningModule):
         self.clip_gradients(optimizer, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
 
 
-class QFormerImprovedGenerativeLightning(pl.LightningModule):
-    """Lightning module for QFormerImprovedGenerative."""
+class QFormerImprovedGQALightning(pl.LightningModule):
+    """Lightning module for QFormerImproved on GQA dataset."""
     
     def __init__(self, hyperparams: dict, device: torch.device):
         super().__init__()
@@ -148,10 +165,21 @@ class QFormerImprovedGenerativeLightning(pl.LightningModule):
     def forward(self, samples: dict):
         return self.model(samples)
     
+    def _compute_exact_match(self, generated: list[str], ground_truth: list[str]) -> float:
+        """Compute normalized exact match accuracy."""
+        return compute_batch_exact_match(generated, ground_truth)
+    
     def _common_step(self, batch: dict, task: str):
         output = self.forward(batch)
+        
+        # Compute normalized exact match
+        exact_match = self._compute_exact_match(
+            output['generated_answers'],
+            output['ground_truth_answers']
+        )
+        exact_match_tensor = torch.tensor(exact_match, device=self.device)
 
-        self.log(f"{task}_answer_accuracy", output['answer_accuracy'], prog_bar=True, 
+        self.log(f"{task}_exact_match", exact_match_tensor, prog_bar=True, 
                  on_step=True, on_epoch=True, batch_size=self.hyperparams['batch_size'])
         self.log(f"{task}_loss_generation", output['loss_generation'], prog_bar=True,
                  on_step=True, on_epoch=True, batch_size=self.hyperparams['batch_size'])
@@ -168,12 +196,19 @@ class QFormerImprovedGenerativeLightning(pl.LightningModule):
         
         # Log examples
         if task == "val" and self.global_step % 100 == 0:
+            logger.info(f"=== Sample predictions (step {self.global_step}) ===")
             for i in range(min(3, len(output['generated_answers']))):
+                gt = output['ground_truth_answers'][i]
+                gen = output['generated_answers'][i]
+                gt_norm = normalize_answer(gt)
+                gen_norm = normalize_answer(gen)
+                match = "✓" if gt_norm == gen_norm else "✗"
                 logger.info(f"Q: {batch['question'][i]}")
-                logger.info(f"GT: {output['ground_truth_answers'][i]}")
-                logger.info(f"Gen: {output['generated_answers'][i]}")
+                logger.info(f"GT: {gt} -> '{gt_norm}'")
+                logger.info(f"Gen: {gen} -> '{gen_norm}' [{match}]")
                 logger.info("---")
-
+        
+        output['exact_match'] = exact_match_tensor
         return output
     
     def training_step(self, batch: dict):

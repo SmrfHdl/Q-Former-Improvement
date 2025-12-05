@@ -1,10 +1,12 @@
 """
-Trainer for Generative VQA models.
+Trainer for GQA Visual Reasoning VQA models.
 
-Key differences from classification approach:
-- No vocabulary needed
-- Model generates text directly  
-- Accuracy = exact match between generated and ground truth
+Uses GQA dataset with:
+- train_balanced: Training split
+- val_balanced: Validation split  
+- test_balanced: Test split
+
+Evaluation: Normalized Exact Match accuracy
 """
 
 import torch
@@ -25,10 +27,10 @@ src_dir = Path(__file__).parent.parent
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from datasets.dataset_generative import load_vqa_dataset_from_hf, create_generative_dataloader
-from model_training.q_former_generative import (
-    QFormerBaseGenerativeLightning,
-    QFormerImprovedGenerativeLightning
+from datasets.dataset_gqa import load_gqa_dataset_from_hf, create_gqa_dataloader
+from model_training.q_former_gqa import (
+    QFormerBaseGQALightning,
+    QFormerImprovedGQALightning
 )
 
 
@@ -43,23 +45,26 @@ def set_seed(seed: int):
         torch.backends.cudnn.benchmark = False
 
 
-def train_generative(
+def train_gqa(
     model_name: str,
     use_clip_for_text: bool = True,
     gpu_device: int = 0,
     num_gpus: int = None,
-    results_dir: str = "../results_generative",
-    models_dir: str = "../saved_models_generative",
+    results_dir: str = "../results_gqa",
+    models_dir: str = "../saved_models_gqa",
     config_dir: str = "../configs",
     seed: int = 42,
     run_id: int = 0,
     use_wandb: bool = True,
-    wandb_project: str = "q-former-generative",
+    wandb_project: str = "q-former-gqa",
     wandb_entity: str = None,
+    max_train_samples: int = None,
+    max_val_samples: int = None,
+    max_test_samples: int = None,
 ):
-    """Train generative VQA model."""
+    """Train GQA VQA model."""
     
-    logger.info(f"Starting Generative VQA training: {model_name}")
+    logger.info(f"Starting GQA VQA training: {model_name}")
     
     # Device setup
     if num_gpus and num_gpus > 1:
@@ -75,6 +80,14 @@ def train_generative(
     config_path = config_dir_path / f"config_{model_name.lower()}.json"
     
     if not config_path.exists():
+        # Fallback to base config
+        if "improved" in model_name.lower():
+            config_path = config_dir_path / "config_qformer_improved_gqa.json"
+        else:
+            config_path = config_dir_path / "config_qformer_base_gqa.json"
+    
+    if not config_path.exists():
+        # Ultimate fallback
         config_path = config_dir_path / "config_qformer_improved.json"
     
     with open(config_path, 'r') as f:
@@ -100,46 +113,51 @@ def train_generative(
             wandb_logger = WandbLogger(
                 project=wandb_project, entity=wandb_entity,
                 name=wandb_run_name, save_dir=str(results_dir),
-                tags=[model_name, encoder_type, "generative"]
+                tags=[model_name, encoder_type, "gqa", "exact_match"]
             )
             wandb_logger.experiment.config.update({**hyperparams, "model_name": model_name})
         except Exception as e:
             logger.warning(f"Wandb init failed: {e}")
             wandb_logger = None
 
-    # Load data
-    logger.info("Loading dataset...")
-    train_df, val_df, test_df = load_vqa_dataset_from_hf()
+    # Load GQA data
+    logger.info("Loading GQA dataset...")
+    train_df, val_df, test_df = load_gqa_dataset_from_hf(
+        max_train_samples=max_train_samples,
+        max_val_samples=max_val_samples,
+        max_test_samples=max_test_samples,
+    )
     
-    train_loader, val_loader, test_loader = create_generative_dataloader(
+    train_loader, val_loader, test_loader = create_gqa_dataloader(
         train_df, val_df, test_df,
         batch_size=hyperparams['batch_size'],
         device=device,
         use_augmentation=hyperparams.get('use_data_augmentation', False),
+        augmentation_prob=hyperparams.get('augmentation_prob', 0.3),
         num_workers=hyperparams.get('num_workers', 0),
         pin_memory=hyperparams.get('pin_memory', False),
     )
 
     # Create model
-    if model_name.lower() == "qformer_base_generative":
-        model = QFormerBaseGenerativeLightning(hyperparams=hyperparams, device=device)
-    elif model_name.lower() == "qformer_improved_generative":
-        model = QFormerImprovedGenerativeLightning(hyperparams=hyperparams, device=device)
+    if model_name.lower() == "qformer_base_gqa":
+        model = QFormerBaseGQALightning(hyperparams=hyperparams, device=device)
+    elif model_name.lower() == "qformer_improved_gqa":
+        model = QFormerImprovedGQALightning(hyperparams=hyperparams, device=device)
     else:
-        raise ValueError(f"Unknown model: {model_name}")
+        raise ValueError(f"Unknown model: {model_name}. Choose from: qformer_base_gqa, qformer_improved_gqa")
 
     # Callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=str(results_dir),
         filename=f"{model_name}_{encoder_type}_run{run_id}_best",
-        monitor="val_answer_accuracy",
+        monitor="val_exact_match",
         mode="max",
         save_top_k=1,
         verbose=True
     )
 
     early_stopping = EarlyStopping(
-        monitor="val_answer_accuracy",
+        monitor="val_exact_match",
         patience=hyperparams.get('patience', 10),
         mode="max",
         verbose=True
@@ -181,9 +199,11 @@ def train_generative(
     )
 
     # Train
+    logger.info("Starting training...")
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
     # Test
+    logger.info("Evaluating on test set...")
     if os.path.exists(checkpoint_callback.best_model_path):
         best_model = type(model).load_from_checkpoint(
             checkpoint_callback.best_model_path,
@@ -195,19 +215,19 @@ def train_generative(
         test_results = trainer.test(model, dataloaders=test_loader)
 
     # Log results
-    test_accuracy = test_results[0].get('test_answer_accuracy_epoch', 0.0) if test_results else 0.0
-    if isinstance(test_accuracy, torch.Tensor):
-        test_accuracy = test_accuracy.item()
+    test_exact_match = test_results[0].get('test_exact_match_epoch', 0.0) if test_results else 0.0
+    if isinstance(test_exact_match, torch.Tensor):
+        test_exact_match = test_exact_match.item()
 
-    logger.info(f"Test Exact Match Accuracy: {test_accuracy:.4f}")
+    logger.info(f"Test Exact Match Accuracy: {test_exact_match:.4f}")
 
     # Save summary
     summary_file = results_dir / f"{model_name}_{encoder_type}_summary.csv"
     with open(summary_file, 'a', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['run_id', 'seed', 'test_accuracy'])
+        writer = csv.DictWriter(f, fieldnames=['run_id', 'seed', 'test_exact_match'])
         if f.tell() == 0:
             writer.writeheader()
-        writer.writerow({'run_id': run_id, 'seed': seed, 'test_accuracy': test_accuracy})
+        writer.writerow({'run_id': run_id, 'seed': seed, 'test_exact_match': test_exact_match})
 
     if wandb_logger:
         try:
@@ -215,7 +235,10 @@ def train_generative(
         except:
             pass
 
-    return {'test_accuracy': test_accuracy, 'best_model_path': checkpoint_callback.best_model_path}
+    return {
+        'test_exact_match': test_exact_match, 
+        'best_model_path': checkpoint_callback.best_model_path
+    }
 
 
 def str2bool(v):
@@ -227,25 +250,33 @@ def str2bool(v):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Generative VQA")
+    parser = argparse.ArgumentParser(description="Train GQA VQA Model")
 
     parser.add_argument("--model_name", type=str, required=True,
-                        choices=["qformer_base_generative", "qformer_improved_generative"])
+                        choices=["qformer_base_gqa", "qformer_improved_gqa"])
     parser.add_argument("--use_clip_for_text", type=str2bool, default=True)
     parser.add_argument("--gpu_device", type=int, default=0)
     parser.add_argument("--num_gpus", type=int, default=None)
-    parser.add_argument("--results_dir", type=str, default="../results_generative")
-    parser.add_argument("--models_dir", type=str, default="../saved_models_generative")
+    parser.add_argument("--results_dir", type=str, default="../results_gqa")
+    parser.add_argument("--models_dir", type=str, default="../saved_models_gqa")
     parser.add_argument("--config_dir", type=str, default="../configs")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--run_id", type=int, default=0)
     parser.add_argument("--use_wandb", type=str2bool, default=True)
-    parser.add_argument("--wandb_project", type=str, default="q-former-generative")
+    parser.add_argument("--wandb_project", type=str, default="q-former-gqa")
     parser.add_argument("--wandb_entity", type=str, default=None)
+    
+    # Dataset size limits (for debugging/fast iteration)
+    parser.add_argument("--max_train_samples", type=int, default=None,
+                        help="Maximum training samples (default: all)")
+    parser.add_argument("--max_val_samples", type=int, default=None,
+                        help="Maximum validation samples (default: all)")
+    parser.add_argument("--max_test_samples", type=int, default=None,
+                        help="Maximum test samples (default: all)")
 
     args = parser.parse_args()
 
-    train_generative(
+    train_gqa(
         model_name=args.model_name,
         use_clip_for_text=args.use_clip_for_text,
         gpu_device=args.gpu_device,
@@ -258,5 +289,8 @@ if __name__ == "__main__":
         use_wandb=args.use_wandb,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
+        max_train_samples=args.max_train_samples,
+        max_val_samples=args.max_val_samples,
+        max_test_samples=args.max_test_samples,
     )
 
