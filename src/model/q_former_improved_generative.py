@@ -7,6 +7,11 @@ from transformers import BertTokenizer, BertModel
 from layers.cross_modal_transformer import CrossModalTransformer
 from model.clip_vit import VisionEncoder
 from loguru import logger
+from model.q_former_improved import (
+    SceneGraphGenerator,
+    NeuralStateMachine,
+    ObjectDetectionPath,
+)
 
 
 def normalize_answer(answer: str) -> str:
@@ -55,13 +60,6 @@ def compute_exact_match(prediction: str, ground_truth: str) -> float:
     pred_normalized = normalize_answer(prediction)
     gt_normalized = normalize_answer(ground_truth)
     return 1.0 if pred_normalized == gt_normalized else 0.0
-
-# Import components from improved model
-from model.q_former_improved import (
-    SceneGraphGenerator,
-    NeuralStateMachine,
-    ObjectDetectionPath,
-)
 
 
 class GenerativeReasoningPath(nn.Module):
