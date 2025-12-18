@@ -841,16 +841,206 @@ class HierarchicalGate(nn.Module):
         return gate_values * lower_level + (1 - gate_values) * current_level
 
 
+class PositionalEncoding2D(nn.Module):
+    """
+    2D Sinusoidal Positional Encoding for image patches.
+    Creates position embeddings that encode the (x, y) location of each patch.
+    """
+    def __init__(self, dim: int, max_h: int = 16, max_w: int = 16, temperature: float = 10000.0):
+        super().__init__()
+        self.dim = dim
+        self.max_h = max_h
+        self.max_w = max_w
+        
+        # Create 2D position encodings
+        pe = torch.zeros(max_h, max_w, dim)
+        
+        y_pos = torch.arange(0, max_h).unsqueeze(1).repeat(1, max_w)
+        x_pos = torch.arange(0, max_w).unsqueeze(0).repeat(max_h, 1)
+        
+        # Normalize to [0, 1]
+        y_pos = y_pos.float() / (max_h - 1)
+        x_pos = x_pos.float() / (max_w - 1)
+        
+        dim_t = torch.arange(0, dim // 2, dtype=torch.float32)
+        dim_t = temperature ** (2 * (dim_t // 2) / (dim // 2))
+        
+        # Encode x and y separately, then concatenate
+        pe[:, :, 0::4] = torch.sin(x_pos.unsqueeze(-1) * math.pi / dim_t[::2].unsqueeze(0).unsqueeze(0))
+        pe[:, :, 1::4] = torch.cos(x_pos.unsqueeze(-1) * math.pi / dim_t[::2].unsqueeze(0).unsqueeze(0))
+        pe[:, :, 2::4] = torch.sin(y_pos.unsqueeze(-1) * math.pi / dim_t[1::2].unsqueeze(0).unsqueeze(0))
+        pe[:, :, 3::4] = torch.cos(y_pos.unsqueeze(-1) * math.pi / dim_t[1::2].unsqueeze(0).unsqueeze(0))
+        
+        # Register as buffer (not trainable)
+        self.register_buffer('pe', pe.reshape(-1, dim))  # (H*W, dim)
+        
+        # Store normalized coordinates for each patch
+        coords = torch.stack([
+            x_pos.reshape(-1),  # x coordinates [0, 1]
+            y_pos.reshape(-1),  # y coordinates [0, 1]
+        ], dim=-1)  # (H*W, 2)
+        self.register_buffer('patch_coords', coords)
+        
+    def forward(self, num_patches: int):
+        """Return positional encoding for given number of patches."""
+        return self.pe[:num_patches]
+    
+    def get_patch_coordinates(self, num_patches: int):
+        """Return normalized (x, y) coordinates for each patch."""
+        return self.patch_coords[:num_patches]
+
+
+class AttentionBasedBoxPredictor(nn.Module):
+    """
+    Predicts bounding boxes from cross-attention weights.
+    
+    Key idea: Use attention distribution over patches as soft spatial localization.
+    The bounding box is computed as weighted statistics of patch positions.
+    
+    Inspired by: MDETR, OWL-ViT attention-based localization
+    """
+    def __init__(self, dim: int, num_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        
+        # Query projection for computing attention
+        self.query_proj = nn.Linear(dim, dim)
+        self.key_proj = nn.Linear(dim, dim)
+        
+        # Box refinement MLP - takes attention statistics and refines
+        self.box_refine = nn.Sequential(
+            nn.Linear(dim + 4, dim // 2),  # features + initial box
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim // 2, 4),  # delta x, y, w, h
+        )
+        
+        # Confidence prediction from attention entropy
+        self.confidence_mlp = nn.Sequential(
+            nn.Linear(dim + 4, dim // 4),
+            nn.GELU(),
+            nn.Linear(dim // 4, 1)
+        )
+        
+        self.scale = (dim // num_heads) ** -0.5
+        
+    def forward(self, object_features: torch.Tensor, image_features: torch.Tensor, 
+                patch_coords: torch.Tensor):
+        """
+        Args:
+            object_features: (batch, num_obj, dim) - object query features
+            image_features: (batch, num_patches, dim) - image patch features  
+            patch_coords: (num_patches, 2) - normalized (x, y) coords for each patch
+            
+        Returns:
+            boxes: (batch, num_obj, 4) - predicted [x, y, w, h] normalized
+            confidence: (batch, num_obj, 1) - objectness score
+            attention_weights: (batch, num_obj, num_patches) - for visualization
+        """
+        batch, num_obj, _ = object_features.shape
+        num_patches = image_features.shape[1]
+        
+        # Compute cross-attention weights
+        Q = self.query_proj(object_features)  # (B, num_obj, dim)
+        K = self.key_proj(image_features)      # (B, num_patches, dim)
+        
+        # Attention scores
+        attn_weights = torch.bmm(Q, K.transpose(-2, -1)) * self.scale  # (B, num_obj, num_patches)
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        
+        # Expand patch_coords for batch processing
+        patch_coords = patch_coords.unsqueeze(0).expand(batch, -1, -1)  # (B, num_patches, 2)
+        
+        # === Compute bounding box from attention distribution ===
+        
+        # Weighted mean of patch coordinates = center (cx, cy)
+        # attn_weights: (B, num_obj, num_patches)
+        # patch_coords: (B, num_patches, 2)
+        weighted_coords = torch.bmm(attn_weights, patch_coords)  # (B, num_obj, 2)
+        cx = weighted_coords[:, :, 0]  # (B, num_obj)
+        cy = weighted_coords[:, :, 1]  # (B, num_obj)
+        
+        # Weighted variance = approximate width/height
+        # Var(X) = E[X^2] - E[X]^2
+        coords_sq = patch_coords ** 2  # (B, num_patches, 2)
+        weighted_coords_sq = torch.bmm(attn_weights, coords_sq)  # (B, num_obj, 2)
+        
+        var_x = weighted_coords_sq[:, :, 0] - cx ** 2
+        var_y = weighted_coords_sq[:, :, 1] - cy ** 2
+        
+        # Standard deviation * 2 ≈ width/height (covers ~95% of attention mass)
+        std_x = torch.sqrt(var_x.clamp(min=1e-6))
+        std_y = torch.sqrt(var_y.clamp(min=1e-6))
+        
+        # Initial box estimate: [x, y, w, h] where (x,y) is top-left corner
+        init_w = (std_x * 4).clamp(min=0.05, max=1.0)  # 2 * 2*std
+        init_h = (std_y * 4).clamp(min=0.05, max=1.0)
+        init_x = (cx - init_w / 2).clamp(min=0.0, max=1.0)
+        init_y = (cy - init_h / 2).clamp(min=0.0, max=1.0)
+        
+        init_box = torch.stack([init_x, init_y, init_w, init_h], dim=-1)  # (B, num_obj, 4)
+        
+        # === Refine box using object features ===
+        refine_input = torch.cat([object_features, init_box], dim=-1)
+        box_delta = self.box_refine(refine_input)  # (B, num_obj, 4)
+        
+        # Apply delta with sigmoid to keep in valid range
+        refined_box = init_box + 0.1 * torch.tanh(box_delta)  # Small refinement
+        refined_box = refined_box.clamp(min=0.0, max=1.0)
+        
+        # Ensure w, h are positive
+        refined_box[:, :, 2:] = refined_box[:, :, 2:].clamp(min=0.02)
+        
+        # === Compute confidence from attention entropy ===
+        # Low entropy = focused attention = high confidence
+        entropy = -(attn_weights * (attn_weights + 1e-8).log()).sum(dim=-1, keepdim=True)  # (B, num_obj, 1)
+        max_entropy = math.log(num_patches)
+        normalized_entropy = entropy / max_entropy  # [0, 1]
+        
+        conf_input = torch.cat([object_features, init_box], dim=-1)
+        confidence_logits = self.confidence_mlp(conf_input)
+        
+        # Combine MLP confidence with attention entropy
+        confidence_logits = confidence_logits - normalized_entropy  # Lower entropy = higher confidence
+        
+        return refined_box, confidence_logits, attn_weights
+
+
 class ObjectDetectionPath(nn.Module):
     """
-    Level 1: Object Detection Path
-    Extracts object-level features with spatial and attribute information.
+    Level 1: Object Detection Path with Attention-based Bounding Box Prediction.
+    
+    Key improvements:
+    1. 2D Positional Encoding for explicit spatial awareness
+    2. Attention-based box prediction from cross-attention weights
+    3. Multi-layer iterative refinement
+    
+    The bounding boxes are computed from WHERE the object queries attend in the image,
+    providing geometrically meaningful localization.
     """
     def __init__(self, dim: int, num_heads: int, num_layers: int, 
-                 num_object_queries: int, dropout: float = 0.1):
+                 num_object_queries: int, dropout: float = 0.1,
+                 image_size: int = 224, patch_size: int = 14):
         super().__init__()
         
+        self.dim = dim
+        self.num_heads = num_heads
+        self.num_object_queries = num_object_queries
+        
+        # Calculate grid size from image/patch dimensions
+        self.grid_size = image_size // patch_size  # 16 for 224/14
+        self.num_patches = self.grid_size ** 2  # 256 patches
+        
+        # Learnable object queries
         self.object_queries = nn.Parameter(torch.randn(1, num_object_queries, dim))
+        
+        # 2D Positional encoding for patches
+        self.pos_encoding_2d = PositionalEncoding2D(
+            dim=dim, 
+            max_h=self.grid_size, 
+            max_w=self.grid_size
+        )
         
         # Cross-modal transformer for object detection
         self.object_transformer = CrossModalTransformer(
@@ -860,9 +1050,19 @@ class ObjectDetectionPath(nn.Module):
             dropout=dropout
         )
         
-        # Object attribute heads
-        self.spatial_head = nn.Linear(dim, 4)  # x, y, w, h
-        self.confidence_head = nn.Linear(dim, 1)  # objectness score
+        # Attention-based box predictor
+        self.box_predictor = AttentionBasedBoxPredictor(dim, num_heads, dropout)
+        
+        # Additional box refinement layers (iterative)
+        self.num_refine_layers = 2
+        self.refine_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(dim + 4, dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim, 4)
+            ) for _ in range(self.num_refine_layers)
+        ])
         
         # Object feature refinement
         self.refine = nn.Sequential(
@@ -873,24 +1073,76 @@ class ObjectDetectionPath(nn.Module):
             nn.LayerNorm(dim)
         )
         
+        # Spatial feature encoder - encode box back into features
+        self.spatial_to_feature = nn.Sequential(
+            nn.Linear(4, dim // 4),
+            nn.GELU(),
+            nn.Linear(dim // 4, dim)
+        )
+        
     def forward(self, image_features: torch.Tensor, text_embeddings: torch.Tensor, 
                 attention_mask: torch.Tensor = None):
+        """
+        Args:
+            image_features: (batch, num_patches + 1, dim) - includes CLS token
+            text_embeddings: (batch, seq_len, dim)
+            attention_mask: attention mask
+            
+        Returns:
+            object_features: (batch, num_obj, dim) - refined object representations
+            spatial_info: (batch, num_obj, 4) - predicted bounding boxes [x, y, w, h]
+            confidence_logits: (batch, num_obj, 1) - objectness scores
+            attention_maps: (batch, num_obj, num_patches) - for visualization
+        """
         batch_size = image_features.shape[0]
+        
+        # Remove CLS token if present (ViT typically has CLS at position 0)
+        if image_features.shape[1] == self.num_patches + 1:
+            patch_features = image_features[:, 1:, :]  # (B, num_patches, dim)
+        else:
+            patch_features = image_features
+            
+        num_patches = patch_features.shape[1]
+        
+        # Add 2D positional encoding to patches
+        pos_encoding = self.pos_encoding_2d(num_patches)  # (num_patches, dim)
+        patch_features_with_pos = patch_features + pos_encoding.unsqueeze(0)
+        
+        # Get patch coordinates for box prediction
+        patch_coords = self.pos_encoding_2d.get_patch_coordinates(num_patches)  # (num_patches, 2)
+        
+        # Initialize object queries
         object_queries = self.object_queries.expand(batch_size, -1, -1).clone()
         
         # Extract object features through cross-attention with image
         object_features, _ = self.object_transformer(
-            object_queries, image_features, text_embeddings, attention_mask
+            object_queries, patch_features_with_pos, text_embeddings, attention_mask
         )
         
-        # Predict spatial information and confidence
-        spatial_info = torch.sigmoid(self.spatial_head(object_features))
-        confidence_logits = self.confidence_head(object_features)
+        # Predict boxes from attention patterns
+        spatial_info, confidence_logits, attention_maps = self.box_predictor(
+            object_features, patch_features_with_pos, patch_coords
+        )
         
-        # Refine object features
+        # Iterative box refinement
+        current_box = spatial_info
+        for refine_layer in self.refine_layers:
+            refine_input = torch.cat([object_features, current_box], dim=-1)
+            box_delta = refine_layer(refine_input)
+            current_box = current_box + 0.1 * torch.tanh(box_delta)
+            current_box = current_box.clamp(min=0.0, max=1.0)
+            current_box[:, :, 2:] = current_box[:, :, 2:].clamp(min=0.02)  # min w, h
+        
+        spatial_info = current_box
+        
+        # Enhance object features with spatial information
+        spatial_features = self.spatial_to_feature(spatial_info)
+        object_features = object_features + spatial_features
+        
+        # Final refinement
         object_features = self.refine(object_features)
         
-        return object_features, spatial_info, confidence_logits
+        return object_features, spatial_info, confidence_logits, attention_maps
 
 
 # MAIN Q-FORMER IMPROVED MODEL
@@ -960,7 +1212,9 @@ class QFormerImproved(nn.Module):
             num_heads=num_heads,
             num_layers=layers_per_level,
             num_object_queries=num_object_queries,
-            dropout=dropout_rate
+            dropout=dropout_rate,
+            image_size=224,  # ViT input size
+            patch_size=14    # ViT-L/14 patch size
         )
         
         # Level 2: Scene Graph Generation
@@ -1158,7 +1412,7 @@ class QFormerImproved(nn.Module):
             device=self.device
         )
         
-        object_features, spatial_info, object_confidence_logits = self.object_path(
+        object_features, spatial_info, object_confidence_logits, object_attention_maps = self.object_path(
             image_features, text_embeddings, attention_mask_l1
         )
         
@@ -1362,4 +1616,5 @@ class QFormerImproved(nn.Module):
             'spatial_info': spatial_info.detach(),
             'relation_logits': relation_logits.detach(),
             'nsm_attention': nsm_attention,  # For visualization
+            'object_attention_maps': object_attention_maps.detach(),  # For bbox visualization
         }
