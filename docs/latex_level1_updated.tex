@@ -1,0 +1,114 @@
+\subsection{Tầng 1: Định vị và biểu diễn đặc trưng vật thể}
+\label{subsec:level1_obj}
+
+Tại tầng thấp nhất của tháp nhận thức, nhiệm vụ của mô hình là chuyển đổi các đặc trưng thị giác thô từ bộ mã hóa ảnh thành các thực thể có ý nghĩa ngữ nghĩa. Khác với cách tiếp cận sử dụng tập queries chung chung (\textit{generic queries}) trong Q-Former nguyên bản, kiến trúc đề xuất khởi tạo một tập tham số chuyên biệt gọi là \textit{Object Queries}, ký hiệu \(Q_{\text{obj}} \in \mathbb{R}^{N_{\text{obj}} \times D}\). Sự chuyên biệt hóa này cho phép mô hình tập trung vào việc phát hiện và tách biệt các đối tượng cụ thể trong ảnh.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{image/lv_1.png}
+    \caption{Kiến trúc Tầng 1: Định vị và biểu diễn đặc trưng vật thể dựa trên cơ chế attention.}
+    \label{fig:level_1}
+\end{figure}
+
+\subsubsection{Mã hóa vị trí 2D cho các patch ảnh}
+
+Để cung cấp thông tin không gian tường minh cho quá trình định vị đối tượng, đặc trưng ảnh \(V\) từ bộ mã hóa thị giác (ViT) được bổ sung mã hóa vị trí 2D (\textit{2D Positional Encoding}). Với lưới patch kích thước \(H \times W\) (ví dụ: \(16 \times 16\) với ảnh \(224 \times 224\) và patch size \(14 \times 14\)), mỗi patch tại vị trí \((i, j)\) được gán tọa độ chuẩn hóa:
+\begin{equation}
+    (x_{ij}, y_{ij}) = \left(\frac{j}{W-1}, \frac{i}{H-1}\right) \in [0, 1]^2
+\end{equation}
+
+Mã hóa vị trí sử dụng hàm sin-cos tương tự Transformer nhưng mở rộng cho 2D:
+\begin{equation}
+    \text{PE}_{2D}(x, y) = [\sin(x \cdot \omega_k), \cos(x \cdot \omega_k), \sin(y \cdot \omega_k), \cos(y \cdot \omega_k)]_{k=1}^{D/4}
+\end{equation}
+trong đó \(\omega_k = \pi / T^{2k/D}\) với \(T\) là hằng số nhiệt độ (\textit{temperature}).
+
+Đặc trưng ảnh được làm giàu thông tin vị trí:
+\begin{equation}
+    \tilde{V} = V + \text{PE}_{2D}
+\end{equation}
+
+\subsubsection{Trích xuất đặc trưng vật thể qua Cross-Attention}
+
+Quá trình trích xuất đặc trưng vật thể \(O\) được thực hiện thông qua cơ chế cross-attention, trong đó các object queries đóng vai trò là tác nhân truy vấn thông tin từ đặc trưng ảnh đã được bổ sung vị trí \(\tilde{V}\):
+\begin{equation}
+    O = \text{CrossModalTransformer}(Q_{\text{obj}}, \tilde{V}, T)
+\end{equation}
+trong đó \(T\) là embedding văn bản (câu hỏi), được tích hợp để hướng dẫn quá trình phát hiện đối tượng theo ngữ cảnh.
+
+\subsubsection{Dự đoán hộp bao dựa trên phân bố Attention}
+
+Đây là đóng góp cải tiến chính của kiến trúc đề xuất. Thay vì sử dụng MLP độc lập để hồi quy tọa độ hộp bao (như trong DETR hay Q-Former), phương pháp này tận dụng trực tiếp phân bố attention để suy ra vị trí không gian của đối tượng. Ý tưởng cốt lõi: \textit{vùng mà object query attend mạnh chính là vùng chứa đối tượng tương ứng}.
+
+\paragraph{Tính toán trọng số Attention:}
+\begin{equation}
+    A = \text{softmax}\left(\frac{Q_{\text{proj}}(O) \cdot K_{\text{proj}}(\tilde{V})^\top}{\sqrt{D}}\right) \in \mathbb{R}^{N_{\text{obj}} \times N_{\text{patches}}}
+\end{equation}
+trong đó \(Q_{\text{proj}}\) và \(K_{\text{proj}}\) là các phép chiếu tuyến tính.
+
+\paragraph{Ước lượng tâm hộp bao (Center):}
+Tâm \((c_x, c_y)\) được tính là kỳ vọng có trọng số của tọa độ các patch:
+\begin{equation}
+    c_x = \sum_{p=1}^{N_{\text{patches}}} A_{i,p} \cdot x_p, \quad c_y = \sum_{p=1}^{N_{\text{patches}}} A_{i,p} \cdot y_p
+\end{equation}
+trong đó \((x_p, y_p)\) là tọa độ chuẩn hóa của patch thứ \(p\).
+
+\paragraph{Ước lượng kích thước hộp bao (Width/Height):}
+Chiều rộng và chiều cao được suy ra từ độ lệch chuẩn của phân bố attention:
+\begin{align}
+    \sigma_x^2 &= \sum_{p} A_{i,p} \cdot x_p^2 - c_x^2 \\
+    \sigma_y^2 &= \sum_{p} A_{i,p} \cdot y_p^2 - c_y^2 \\
+    w_{\text{init}} &= 4 \cdot \sigma_x, \quad h_{\text{init}} = 4 \cdot \sigma_y
+\end{align}
+Hệ số 4 đảm bảo hộp bao phủ khoảng 95\% khối lượng attention (tương tự khoảng tin cậy \(\pm 2\sigma\) trong phân phối chuẩn).
+
+\paragraph{Tinh chỉnh lặp (Iterative Refinement):}
+Hộp bao ban đầu được tinh chỉnh qua \(L\) lớp MLP:
+\begin{equation}
+    b_i^{(l+1)} = b_i^{(l)} + 0.1 \cdot \tanh\left(\text{MLP}^{(l)}([o_i; b_i^{(l)}])\right)
+\end{equation}
+trong đó hệ số 0.1 và hàm \(\tanh\) đảm bảo cập nhật nhỏ và ổn định. Hộp bao cuối cùng:
+\begin{equation}
+    b_i = (x_i, y_i, w_i, h_i) = \text{clamp}(b_i^{(L)}, 0, 1)
+\end{equation}
+
+\subsubsection{Dự đoán độ tin cậy dựa trên Entropy}
+
+Độ tin cậy (objectness score) phản ánh mức độ ``tập trung'' của attention. Phân bố attention tập trung (entropy thấp) cho thấy object query đã xác định được một vùng cụ thể, ngược lại phân bố phân tán (entropy cao) cho thấy không có đối tượng rõ ràng.
+
+\paragraph{Tính Entropy của phân bố Attention:}
+\begin{equation}
+    H_i = -\sum_{p=1}^{N_{\text{patches}}} A_{i,p} \cdot \log(A_{i,p} + \epsilon)
+\end{equation}
+
+\paragraph{Chuẩn hóa và kết hợp với MLP:}
+\begin{equation}
+    s_i = \text{MLP}_{\text{conf}}([o_i; b_i]) - \frac{H_i}{\log(N_{\text{patches}})}
+\end{equation}
+trong đó \(\log(N_{\text{patches}})\) là entropy cực đại (phân bố đều), đảm bảo giá trị chuẩn hóa trong \([0, 1]\).
+
+\subsubsection{Tích hợp thông tin không gian vào đặc trưng}
+
+Để đảm bảo đặc trưng đối tượng \(o_i\) chứa thông tin vị trí, hộp bao được mã hóa ngược lại thành vector đặc trưng:
+\begin{equation}
+    o_i^{\text{final}} = \text{LayerNorm}\left(\text{MLP}_{\text{refine}}\left(o_i + \text{MLP}_{\text{spatial}}(b_i)\right)\right)
+\end{equation}
+
+\subsubsection{Tổng hợp đầu ra Tầng 1}
+
+Tập hợp đặc trưng đầu ra \(O = \{o_1^{\text{final}}, o_2^{\text{final}}, \dots, o_{N_{\text{obj}}}^{\text{final}}\}\) được ``neo'' (\textit{grounding}) vào không gian thực của hình ảnh thông qua:
+\begin{itemize}
+    \item \textbf{Đặc trưng vật thể} \(O \in \mathbb{R}^{N_{\text{obj}} \times D}\): biểu diễn ngữ nghĩa của từng đối tượng, đã tích hợp thông tin vị trí.
+    \item \textbf{Hộp bao} \(B = \{b_1, \dots, b_{N_{\text{obj}}}\}\) với \(b_i = (x_i, y_i, w_i, h_i) \in [0,1]^4\): vị trí hình học tuyệt đối, được suy ra trực tiếp từ cơ chế attention.
+    \item \textbf{Độ tin cậy} \(S = \{s_1, \dots, s_{N_{\text{obj}}}\}\): điểm số phản ánh mức độ tồn tại của vật thể, dựa trên entropy của attention.
+    \item \textbf{Bản đồ Attention} \(A \in \mathbb{R}^{N_{\text{obj}} \times N_{\text{patches}}}\): hỗ trợ trực quan hóa và giải thích quyết định của mô hình.
+\end{itemize}
+
+\subsubsection{Ưu điểm của phương pháp Attention-based}
+
+So với cách tiếp cận MLP độc lập, phương pháp dựa trên attention có các ưu điểm:
+\begin{enumerate}
+    \item \textbf{Tính diễn giải (Interpretability):} Bản đồ attention trực tiếp cho thấy mô hình ``nhìn'' vào đâu khi dự đoán hộp bao.
+    \item \textbf{Tính nhất quán (Consistency):} Hộp bao được suy ra từ cùng cơ chế attention dùng để trích xuất đặc trưng, đảm bảo đặc trưng và vị trí tương ứng với nhau.
+    \item \textbf{Không cần ground-truth box:} Phương pháp học end-to-end chỉ với supervision từ câu trả lời VQA, không yêu cầu annotation hộp bao.
+\end{enumerate}

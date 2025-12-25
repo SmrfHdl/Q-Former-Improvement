@@ -1,0 +1,37 @@
+```mermaid
+%%{init: {'theme': 'base'}}%%
+
+flowchart TB
+    subgraph BoxPrediction["🎯 Attention-Based Bounding Box Prediction"]
+        direction TB
+        
+        subgraph Formula["Core Formulas"]
+            F1["<b>Attention Weights:</b><br/>A = softmax(Q·K<sup>T</sup>/√D)"]
+            F2["<b>Center (Weighted Mean):</b><br/>c<sub>x</sub> = Σ A<sub>p</sub>·x<sub>p</sub><br/>c<sub>y</sub> = Σ A<sub>p</sub>·y<sub>p</sub>"]
+            F3["<b>Size (Weighted Variance):</b><br/>σ² = E[X²] - E[X]²<br/>w = 4σ<sub>x</sub>, h = 4σ<sub>y</sub>"]
+            F4["<b>Initial Box:</b><br/>b = (c<sub>x</sub>-w/2, c<sub>y</sub>-h/2, w, h)"]
+            F5["<b>Refinement:</b><br/>b' = b + 0.1·tanh(MLP([o;b]))"]
+        end
+
+        subgraph Visual["Visual Intuition"]
+            direction LR
+            PATCHES["🔲🔲🔲<br/>🔲🟥🟥<br/>🔲🟥🟥<br/>Image Patches"]
+            ATTN_VIS["Attention<br/>Distribution<br/>(heatmap)"]
+            BOX_VIS["📦<br/>Predicted<br/>Box"]
+            
+            PATCHES -->|"attend"| ATTN_VIS
+            ATTN_VIS -->|"statistics"| BOX_VIS
+        end
+    end
+
+    subgraph Confidence["📊 Confidence from Entropy"]
+        direction LR
+        HIGH_CONF["<b>Low Entropy</b><br/>Focused attention<br/>→ High confidence<br/>✅ Object detected"]
+        LOW_CONF["<b>High Entropy</b><br/>Spread attention<br/>→ Low confidence<br/>❌ No clear object"]
+    end
+
+    style BoxPrediction fill:#f5f5f5
+    style Formula fill:#e3f2fd
+    style Visual fill:#fff3e0
+    style Confidence fill:#e8f5e9
+```

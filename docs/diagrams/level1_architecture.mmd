@@ -1,0 +1,139 @@
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4a90d9', 'primaryTextColor': '#fff', 'primaryBorderColor': '#2d5a87', 'lineColor': '#5c5c5c', 'secondaryColor': '#f0f0f0', 'tertiaryColor': '#e8f4f8'}}}%%
+
+flowchart TB
+    subgraph Input["📥 Input"]
+        V["Image Features<br/>(B, P+1, D)<br/>từ ViT Encoder"]
+        T["Text Embeddings<br/>(B, L, D)<br/>Câu hỏi"]
+    end
+
+    subgraph PE["🗺️ 2D Positional Encoding"]
+        direction TB
+        GRID["Patch Grid<br/>H × W (16×16)"]
+        COORDS["Patch Coordinates<br/>(x_p, y_p) ∈ [0,1]²"]
+        SINCOS["Sin-Cos Encoding<br/>PE₂D(x,y)"]
+        
+        GRID --> COORDS
+        COORDS --> SINCOS
+    end
+
+    subgraph ObjQueries["🎯 Object Queries"]
+        Q_OBJ["Q_obj ∈ ℝ^(N_obj × D)<br/>Learnable Parameters<br/>(32 queries)"]
+    end
+
+    subgraph CrossAttn["⚡ Cross-Modal Transformer"]
+        direction TB
+        CONCAT["V + PE₂D → Ṽ"]
+        CROSS["CrossAttention<br/>Q=Q_obj, K=Ṽ, V=Ṽ"]
+        TEXT_GUIDE["Text-Guided<br/>Attention với T"]
+        
+        CONCAT --> CROSS
+        CROSS --> TEXT_GUIDE
+    end
+
+    subgraph AttnBox["📦 Attention-Based Box Predictor"]
+        direction TB
+        
+        subgraph AttnCalc["Tính Attention Weights"]
+            Q_PROJ["Q_proj(O)"]
+            K_PROJ["K_proj(Ṽ)"]
+            ATTN["A = softmax(QK^T/√D)<br/>(B, N_obj, P)"]
+            Q_PROJ --> ATTN
+            K_PROJ --> ATTN
+        end
+        
+        subgraph CenterCalc["Ước lượng Tâm"]
+            CX["c_x = Σ A·x_p"]
+            CY["c_y = Σ A·y_p"]
+        end
+        
+        subgraph SizeCalc["Ước lượng Kích thước"]
+            VAR["σ² = E[X²] - E[X]²"]
+            WH["w = 4σ_x, h = 4σ_y"]
+            VAR --> WH
+        end
+        
+        subgraph InitBox["Hộp bao ban đầu"]
+            INIT["b_init = (c_x-w/2, c_y-h/2, w, h)"]
+        end
+        
+        ATTN --> CenterCalc
+        ATTN --> SizeCalc
+        CenterCalc --> InitBox
+        SizeCalc --> InitBox
+    end
+
+    subgraph Refine["🔄 Iterative Refinement"]
+        direction TB
+        REF1["Layer 1: MLP([o; b]) → Δb"]
+        REF2["Layer 2: MLP([o; b']) → Δb'"]
+        FINAL_BOX["b_final = clamp(b + 0.1·tanh(Δb))"]
+        
+        REF1 --> REF2
+        REF2 --> FINAL_BOX
+    end
+
+    subgraph Confidence["📊 Confidence Prediction"]
+        direction TB
+        ENTROPY["H = -Σ A·log(A)<br/>Entropy của Attention"]
+        CONF_MLP["MLP_conf([o; b])"]
+        CONF_OUT["s = MLP - H/H_max<br/>Objectness Score"]
+        
+        ENTROPY --> CONF_OUT
+        CONF_MLP --> CONF_OUT
+    end
+
+    subgraph SpatialEnc["🔗 Spatial Integration"]
+        SPATIAL_MLP["MLP_spatial(b) → ℝ^D"]
+        ADD["o + spatial_feat"]
+        REFINE_MLP["MLP_refine + LayerNorm"]
+        
+        SPATIAL_MLP --> ADD
+        ADD --> REFINE_MLP
+    end
+
+    subgraph Output["📤 Output Level 1"]
+        O_FEAT["Object Features<br/>O ∈ ℝ^(N_obj × D)"]
+        B_OUT["Bounding Boxes<br/>B ∈ [0,1]^(N_obj × 4)"]
+        S_OUT["Confidence Scores<br/>S ∈ ℝ^N_obj"]
+        A_OUT["Attention Maps<br/>A ∈ ℝ^(N_obj × P)"]
+    end
+
+    %% Connections
+    V --> PE
+    V --> CrossAttn
+    PE --> CrossAttn
+    T --> CrossAttn
+    ObjQueries --> CrossAttn
+    
+    CrossAttn -->|"O (object features)"| AttnBox
+    PE -->|"patch_coords"| AttnBox
+    
+    AttnBox --> Refine
+    CrossAttn -->|"O"| Refine
+    
+    AttnBox -->|"A"| Confidence
+    CrossAttn -->|"O"| Confidence
+    Refine -->|"b"| Confidence
+    
+    Refine -->|"b_final"| SpatialEnc
+    CrossAttn -->|"O"| SpatialEnc
+    
+    SpatialEnc --> O_FEAT
+    Refine --> B_OUT
+    Confidence --> S_OUT
+    AttnBox --> A_OUT
+
+    %% Styling
+    classDef inputStyle fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef processStyle fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef attnStyle fill:#fce4ec,stroke:#c2185b,stroke-width:2px
+    classDef outputStyle fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    classDef refineStyle fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+
+    class V,T,Q_OBJ inputStyle
+    class GRID,COORDS,SINCOS,CONCAT,CROSS,TEXT_GUIDE processStyle
+    class Q_PROJ,K_PROJ,ATTN,CX,CY,VAR,WH,INIT,ENTROPY,CONF_MLP,CONF_OUT attnStyle
+    class REF1,REF2,FINAL_BOX,SPATIAL_MLP,ADD,REFINE_MLP refineStyle
+    class O_FEAT,B_OUT,S_OUT,A_OUT outputStyle
+```

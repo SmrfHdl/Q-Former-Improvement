@@ -1,0 +1,53 @@
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4a90d9'}}}%%
+
+flowchart LR
+    subgraph Stage1["Stage 1: Feature Preparation"]
+        V["🖼️ Image<br/>Features V"]
+        PE["📍 2D Pos<br/>Encoding"]
+        V_PE["Ṽ = V + PE"]
+        V --> V_PE
+        PE --> V_PE
+    end
+
+    subgraph Stage2["Stage 2: Object Query Attention"]
+        Q["🎯 Object<br/>Queries"]
+        CA["⚡ Cross<br/>Attention"]
+        O["Object<br/>Features O"]
+        
+        Q --> CA
+        CA --> O
+    end
+
+    subgraph Stage3["Stage 3: Box from Attention"]
+        A["Attention<br/>Weights A"]
+        CENTER["📍 Center<br/>cx, cy"]
+        SIZE["📏 Size<br/>w, h"]
+        BOX["📦 Box<br/>(x,y,w,h)"]
+        
+        A --> CENTER
+        A --> SIZE
+        CENTER --> BOX
+        SIZE --> BOX
+    end
+
+    subgraph Stage4["Stage 4: Refinement"]
+        REF["🔄 Iterative<br/>Refine ×2"]
+        CONF["📊 Confidence<br/>from Entropy"]
+        FINAL["✅ Final<br/>Output"]
+        
+        REF --> FINAL
+        CONF --> FINAL
+    end
+
+    V_PE --> CA
+    CA --> A
+    O --> REF
+    BOX --> REF
+    A --> CONF
+
+    style Stage1 fill:#e3f2fd
+    style Stage2 fill:#fff3e0
+    style Stage3 fill:#fce4ec
+    style Stage4 fill:#e8f5e9
+```
